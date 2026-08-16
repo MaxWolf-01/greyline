@@ -81,7 +81,9 @@ def _save_atomic(img, path):
     fd, tmp = tempfile.mkstemp(dir=d, prefix=f".{base}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
-            img.save(f, format="PNG")
+            # Fastest zlib level: the wallpaper is rewritten every tick and read
+            # once, and the flat-colour map compresses to ~1.5 MB even at level 1.
+            img.save(f, format="PNG", compress_level=1)
         os.chmod(tmp, 0o666 & ~_umask())
         os.replace(tmp, path)
     except BaseException:

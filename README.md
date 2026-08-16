@@ -320,7 +320,9 @@ flowchart LR
 
 - **`sun.py`** — subsolar point + terminator/twilight boundary latitudes (pure astronomy math).
 - **`geo.py` / `vectormap.py`** — lon/lat → pixel projection; the vector map is drawn from
-  Natural Earth GeoJSON (supersampled for smooth coastlines).
+  Natural Earth GeoJSON (supersampled for smooth coastlines). The finished base map is
+  cached in `$XDG_CACHE_HOME/greyline` and reused until the size, theme or home zone
+  changes — only the terminator and clocks are redrawn each tick. Safe to delete any time.
 - **`render.py`** — composites map + overlays, then draws clocks at native resolution with smart
   label placement (labels pick a side to avoid overlapping each other and the edges).
 - **`backends/`** — the only platform-specific code; everything else is portable.

@@ -87,7 +87,7 @@ class _FakeImage:
     def __init__(self, on_save):
         self._on_save = on_save
 
-    def save(self, f, format=None):
+    def save(self, f, format=None, **kw):
         self._on_save(f)
 
 

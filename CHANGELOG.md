@@ -33,6 +33,16 @@ All notable changes to greyline are documented here. The format is based on
   rounded four times, so it sits closer to the exact wash (worst error 0.98/255 against
   1.98). About 86% of colour samples move, two thirds of them by a single level out of
   255 and none by more than three.
+- **The vector base map is cached on disk, and a steady-state tick is now cheap.** The
+  static part of the picture — ocean, land, borders, zone fills, grid, date line — is
+  rendered once per configuration and reused from `$XDG_CACHE_HOME/greyline` (a ~1.2 MB
+  PNG per output size and theme, newest four kept). With it, a 3840x2400 tick runs in
+  ~0.26 s at 85 MB peak RSS, against ~1.65 s at 577 MB before this release; a cache miss
+  (first run, or after a theme, resolution or DST change) rebuilds at ~1.1 s and 296 MB.
+  The overlays blend through one-byte coverage masks in place, the pipeline stays in
+  opaque RGB throughout — which also spares Pillow's premultiplied copy of the
+  supersampled canvas on every resize — and the night washes run strip by strip into
+  the canvas. Output stays byte-identical, cached or not.
 
 ## [0.6.0] — 2026-08-14
 
