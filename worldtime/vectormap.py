@@ -118,10 +118,27 @@ def build_base(out_w, out_h, theme, font, to_px, ss=2, home_offset=None):
                 continue
             yield [(x + k, y) for x, y in pts] if k else pts
 
+    # The translucent overlays (GMT column, home column, timezone grid) each need their
+    # own layer so overlapping shapes within one blend once, not once per shape. They are
+    # composited and discarded in turn, so one scratch canvas serves all three: at 4K with
+    # ss=2 a canvas is ~147 MB, and allocating three costs that much peak RSS for nothing.
+    scratch = None
+
+    def blank_layer():
+        nonlocal scratch
+        if scratch is None:
+            scratch = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        else:
+            # Not Image.paste(colour, box): that builds a full-size temporary image of the
+            # colour and pastes it, which costs as much as the allocation being avoided.
+            # A rectangle is written scanline-wise, straight into the existing buffer.
+            ImageDraw.Draw(scratch).rectangle([0, 0, W, H], fill=(0, 0, 0, 0))
+        return scratch
+
     def composite(layer):
-        nonlocal img, d
-        img = Image.alpha_composite(img, layer)
-        d = ImageDraw.Draw(img)
+        # In place: Image.alpha_composite() would allocate yet another canvas. `d` keeps
+        # pointing at `img`, whose identity is preserved, so there is nothing to rebind.
+        img.alpha_composite(layer)
 
     # Land fill (Antarctica included — the equator-centred frame puts its −90 data edge at
     # the very bottom, so it reads as the south pole rather than an ugly mid-map cut-off).
@@ -144,7 +161,7 @@ def build_base(out_w, out_h, theme, font, to_px, ss=2, home_offset=None):
         """Fill every timezone polygon at `offset` (UTC hours) with `color`, on its own
         layer (honest — follows the zig-zag boundary; the polar extent falls off the
         frame and is clipped by the canvas)."""
-        layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        layer = blank_layer()
         zd = ImageDraw.Draw(layer)
         for zone, rings in zones:
             if zone is None or abs(zone - offset) > 0.01:
@@ -160,38 +177,41 @@ def build_base(out_w, out_h, theme, font, to_px, ss=2, home_offset=None):
     if home_offset is not None:
         fill_zone(home_offset, theme["column"])
 
-    # Timezone boundaries: each zone polygon's meridional edges, drawn as the grid. Polar
-    # caps (horizontal edges at ±90) and antimeridian split seams (at ±180) are skipped so
-    # only the honest dividing lines remain.
-    grid_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    ld = ImageDraw.Draw(grid_layer)
-    gw = max(1, ss)
-    for _zone, rings in zones:
-        for ring in rings:
-            n = len(ring)
-            base = [px(lon, lat) for lon, lat in ring]
-            drawn = []  # per-segment keep flags
-            for i in range(n):
-                lon0, lat0 = ring[i]
-                lon1, lat1 = ring[(i + 1) % n]
-                cap = (lat0 >= POLAR_CAP_LAT and lat1 >= POLAR_CAP_LAT) or (
-                    lat0 <= -POLAR_CAP_LAT and lat1 <= -POLAR_CAP_LAT
-                )
-                seam = abs(lon0) >= SEAM_LON and abs(lon1) >= SEAM_LON
-                drawn.append(not (cap or seam))
-            for c in wrap_copies(base):
-                run = []  # batch consecutive kept segments into one polyline
+    def draw_grid():
+        """Timezone boundaries: each zone polygon's meridional edges. Polar caps
+        (horizontal edges at ±90) and antimeridian split seams (at ±180) are skipped so
+        only the honest dividing lines remain."""
+        grid_layer = blank_layer()
+        ld = ImageDraw.Draw(grid_layer)
+        gw = max(1, ss)
+        for _zone, rings in zones:
+            for ring in rings:
+                n = len(ring)
+                base = [px(lon, lat) for lon, lat in ring]
+                drawn = []  # per-segment keep flags
                 for i in range(n):
-                    if drawn[i]:
-                        if not run:
-                            run = [c[i]]
-                        run.append(c[(i + 1) % n])
-                    elif len(run) >= 2:
+                    lon0, lat0 = ring[i]
+                    lon1, lat1 = ring[(i + 1) % n]
+                    cap = (lat0 >= POLAR_CAP_LAT and lat1 >= POLAR_CAP_LAT) or (
+                        lat0 <= -POLAR_CAP_LAT and lat1 <= -POLAR_CAP_LAT
+                    )
+                    seam = abs(lon0) >= SEAM_LON and abs(lon1) >= SEAM_LON
+                    drawn.append(not (cap or seam))
+                for c in wrap_copies(base):
+                    run = []  # batch consecutive kept segments into one polyline
+                    for i in range(n):
+                        if drawn[i]:
+                            if not run:
+                                run = [c[i]]
+                            run.append(c[(i + 1) % n])
+                        elif len(run) >= 2:
+                            ld.line(run, fill=tuple(theme["grid"]), width=gw)
+                            run = []
+                    if len(run) >= 2:
                         ld.line(run, fill=tuple(theme["grid"]), width=gw)
-                        run = []
-                if len(run) >= 2:
-                    ld.line(run, fill=tuple(theme["grid"]), width=gw)
-    composite(grid_layer)
+        composite(grid_layer)
+
+    draw_grid()
 
     # International Date Line — red, on top, wrapped so the +180/−180 pieces join up.
     idl = tuple(theme["idl"]) + (255,)
@@ -201,6 +221,9 @@ def build_base(out_w, out_h, theme, font, to_px, ss=2, home_offset=None):
         for c in wrap_copies(pts):
             d.line(c, fill=idl, width=iw)
 
+    # Resizing 4x the output pixels needs a big intermediate of its own, so let the
+    # overlay canvas go first — nothing draws on it again.
+    scratch = None
     img = img.resize((out_w, out_h), Image.LANCZOS)
 
     # Per-column UTC-offset labels at the bottom, drawn at native res for crisp text.

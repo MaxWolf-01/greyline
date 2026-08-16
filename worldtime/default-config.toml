@@ -15,7 +15,7 @@ backend = "auto"            # auto | sway | swww | hyprpaper | x11 (feh/xwallpap
 map_style = "vector"        # vector (scalable, themeable) | raster (needs your own map art, see NOTICE)
 theme = "modus"             # modus | blue | catppuccin | gruvbox | rosepine | tokyonight,
                             # or your own from ~/.config/greyline/themes/ ("dark" = modus)
-format = "24h"              # 24h | 12h
+format = "24h"              # 24h | 12h | hour (hour only; fractional zones keep their minutes)
 # font_family = "Aporetic Sans"  # label font: a fontconfig family name or a font-file path (default: Aporetic Sans, then system fonts)
 # font_scale = 1.0           # scale all label text (e.g. 1.25 = 25% larger, 0.8 = smaller)
 logo = true                 # draw the bottom-left corner logo (bundled default: Tux)
