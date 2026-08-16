@@ -297,6 +297,14 @@ def _place_labels(items, obstacles, bounds, scale):
 
 
 def _fmt_time(local, fmt):
+    if fmt == "hour":
+        # Hour only. On a whole-hour zone the minutes match whatever clock the reader
+        # already has, so they add nothing. Zones offset by a fraction of an hour keep
+        # theirs — India (+5:30), Nepal (+5:45), Chatham (+12:45) and the rest would
+        # otherwise read up to three quarters of an hour wrong.
+        if local.utcoffset().total_seconds() % 3600:
+            return f"{local.hour:02d}:{local.minute:02d}"
+        return f"{local.hour:02d}"
     if fmt == "12h":
         h = local.hour % 12 or 12
         return f"{h}:{local.minute:02d} {'AM' if local.hour < 12 else 'PM'}"

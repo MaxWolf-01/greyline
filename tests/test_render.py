@@ -98,3 +98,36 @@ def test_logo_max_height_caps_tall_logos(tmp_path):
     # Aspect ratio preserved after capping (tall source stays 1:10).
     w_capped = capped[2] - capped[0]
     assert abs(w_capped - h_capped / 10) <= 1
+
+
+# --- hour-only labels ---
+
+@pytest.mark.parametrize(
+    "tz, expected",
+    [
+        ("Europe/Vienna", "14"),        # +2:00 — whole hour, minutes dropped
+        ("America/New_York", "08"),     # -4:00
+        ("Asia/Tokyo", "21"),           # +9:00
+        ("Asia/Kolkata", "17:30"),      # +5:30 — must keep its half hour
+        ("Asia/Kathmandu", "17:45"),    # +5:45
+        ("Pacific/Chatham", "00:45"),   # +12:45, next day
+        ("Australia/Adelaide", "21:30"),  # +9:30
+    ],
+)
+def test_hour_format_keeps_minutes_only_where_the_zone_needs_them(tz, expected):
+    from zoneinfo import ZoneInfo
+    dt = datetime(2026, 8, 16, 12, 0, tzinfo=timezone.utc)
+    assert render._fmt_time(dt.astimezone(ZoneInfo(tz)), "hour") == expected
+
+
+def test_hour_format_does_not_change_within_an_hour():
+    # The whole point: on a whole-hour zone the label is stable between ticks, so the
+    # wallpaper only differs by the terminator moving.
+    from zoneinfo import ZoneInfo
+    vienna = ZoneInfo("Europe/Vienna")
+    labels = {
+        render._fmt_time(datetime(2026, 8, 16, 12, m, tzinfo=timezone.utc).astimezone(vienna),
+                         "hour")
+        for m in range(0, 60, 7)
+    }
+    assert labels == {"14"}

@@ -19,7 +19,7 @@ from . import config, themes
 # config that renders wrong. Keys are dotted paths. (`theme` is validated
 # dynamically against the available theme files — see _validate.)
 _ENUMS = {
-    "format": {"24h", "12h"},
+    "format": {"24h", "12h", "hour"},
     "map_style": {"vector", "raster"},
     "backend": {"auto", "sway", "swww", "hyprpaper", "x11", "windows", "macos", "command"},
     "twilight.darkness": {"subtle", "medium", "dramatic"},
