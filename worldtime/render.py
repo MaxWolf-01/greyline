@@ -68,10 +68,9 @@ class Projection:
     both map styles look consistent.
     """
 
-    def __init__(self, to_px, x_to_lon, lat_to_y, y_to_lat, scale):
+    def __init__(self, to_px, x_to_lon, y_to_lat, scale):
         self.to_px = to_px
         self.x_to_lon = x_to_lon
-        self.lat_to_y = lat_to_y
         self.y_to_lat = y_to_lat
         self.scale = scale
 
@@ -95,7 +94,6 @@ def _raster_projection(out_w, out_h, anchor):
     proj = Projection(
         to_px,
         x_to_lon=lambda x: geo.x_to_lon((x + cx) / sc),
-        lat_to_y=lambda lat: geo.lat_to_y(lat) * sc - cy,
         y_to_lat=lambda y: geo.y_to_lat((y + cy) / sc),
         scale=sc,
     )
@@ -120,7 +118,6 @@ def _vector_projection(out_w, out_h):
         to_px=lambda lon, lat: (cx + (lon - VECTOR_LON_CENTER) * ppd_lon,
                                 cy + (VECTOR_LAT_CENTER - lat) * ppd_lat),
         x_to_lon=lambda x: VECTOR_LON_CENTER + (x - cx) / ppd_lon,
-        lat_to_y=lambda lat: cy + (VECTOR_LAT_CENTER - lat) * ppd_lat,
         y_to_lat=lambda y: VECTOR_LAT_CENTER - (y - cy) / ppd_lat,
         scale=out_w / geo.REF_W,
     )
