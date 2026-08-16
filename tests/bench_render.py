@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""Peak-RSS and wall-time for one render, at the resolution that hurts.
+"""Peak RSS and wall time for one render.
 
-    python tests/bench_render.py [WIDTHxHEIGHT]
+    python tests/bench_render.py [WIDTHxHEIGHT]      # default 3840x2400
 
-Reports tracemalloc's peak Python-side allocation and the process's peak RSS
-(ru_maxrss). Pillow buffers land in RSS but not in tracemalloc, so RSS is the
-number that matters here.
+RSS is the number to watch: the renderer's cost is Pillow's image buffers, which
+are C allocations and so invisible to Python-level tools like tracemalloc. Both
+figures are whole-process and machine-specific — compare runs on one machine, and
+run each a few times, rather than quoting an absolute.
 """
 import resource
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 sys.path.insert(0, ".")
-from worldtime import render  # noqa: E402
+from worldtime import render
 
 CITIES = [
     {"name": "Vienna", "lat": 48.21, "lon": 16.37, "tz": "Europe/Vienna", "home": True},
@@ -29,7 +30,7 @@ CITIES = [
 def main():
     size = sys.argv[1] if len(sys.argv) > 1 else "3840x2400"
     w, h = (int(v) for v in size.lower().split("x"))
-    dt = datetime(2026, 8, 16, 9, 0, tzinfo=timezone.utc)
+    dt = datetime(2026, 8, 16, 9, 0, tzinfo=UTC)
 
     t0 = time.perf_counter()
     img = render.render(CITIES, dt=dt, out_size=(w, h), map_style="vector", logo=False)

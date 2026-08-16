@@ -55,7 +55,7 @@ def _load_font(size, candidates, explicit=None):
             continue
         try:
             return ImageFont.truetype(name, size)
-        except (OSError, IOError):
+        except OSError:
             continue
     return ImageFont.load_default(size)
 
@@ -143,12 +143,6 @@ def _close_curve(curve, sublat, w, h, day_side):
     return curve + ([(w, h), (0, h)] if close_bottom else [(w, 0), (0, 0)])
 
 
-def _terminator_polygon(elevation, sublat, sublon, proj, w, h, step=3, day_side=False):
-    """Polygon (output px) for the region darker than `elevation` (or the lit side)."""
-    curve = _terminator_curve(elevation, sublat, sublon, proj, w, h, step)
-    return _close_curve(curve, sublat, w, h, day_side)
-
-
 def _multiply_pow(tint, k):
     """The multiply tint equivalent to `k` stacked multiplies by `tint`."""
     return tuple(round(255.0 * (c / 255.0) ** k) for c in tint)
@@ -178,15 +172,14 @@ def _overlay_night(base, dt, theme, bands, alpha, proj):
     fine lines underneath (works for both the raster art and the vector map):
       - day-side LIGHT washes (SCREEN toward the sun) — brighten the lit hemisphere;
       - night-side DARK washes (MULTIPLY toward midnight) — deepen the dark hemisphere.
-    The civil/nautical/astronomical elevations are stacked, so each twilight band is a
-    distinct step.
+    The civil/nautical/astronomical elevations make each twilight band a distinct step: a
+    pixel `k` bands deep is washed `k` times.
 
-    The bands nest, so the stack collapses into a single blend per side. A pixel covered
-    by `k` of them is washed `k` times, and both multiply and screen compose to a closed
-    form (_multiply_pow / _screen_pow). Painting the nested polygons outermost-first into
-    ONE layer, each with its own cumulative tint, gives the same picture from one blend
-    instead of four — at 4K that is ~170 MB of intermediate images per render rather than
-    ~660 MB, and it rounds once instead of four times.
+    Those bands nest, and multiply and screen each compose to a closed form
+    (_multiply_pow / _screen_pow), so one blend per side suffices. The nested polygons are
+    painted outermost-first into a single layer, each with the tint its depth calls for.
+    Blending per band instead would allocate a full-canvas image per band, and a canvas is
+    the largest allocation in the renderer.
     """
     w, h = base.size
     sublat, sublon = sun.subsolar_point(dt)

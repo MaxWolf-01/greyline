@@ -4,6 +4,35 @@ All notable changes to greyline are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`format = "hour"`.** City labels carry the hour alone. On a whole-hour zone the
+  minutes match any clock the reader already has, so they cost width for nothing. Zones
+  offset by a fraction of an hour — India (+5:30), Nepal (+5:45), Iran (+3:30), Chatham
+  (+12:45), Adelaide (+9:30) — keep their minutes, derived from the zone's real UTC
+  offset rather than a list.
+
+### Fixed
+- **The wallpaper is written atomically.** It was saved straight onto the path desktops
+  watch, which truncates the file and then fills it over the encode — several hundred
+  milliseconds at 4K. A watcher firing on the first write read a PNG that stopped
+  mid-file; on GNOME that surfaced as unhandled promise rejections from `background.js`.
+  The render now goes to a temp file in the same directory and is moved into place, so a
+  watcher sees either the whole previous image or the whole new one. A failed encode
+  leaves the previous wallpaper up instead of blanking the desktop.
+
+### Changed
+- **A 4K render costs about a fifth less memory and time.** At 3840x2400 peak RSS drops
+  from ~577 MB to ~471 MB, measured over five runs. The three translucent overlays share
+  one buffer instead of allocating one each, that buffer is released before the
+  supersampled canvas is downsampled, and the four stacked twilight blends collapse into
+  one per side — the bands nest, and multiply and screen both compose to a closed form.
+  Rendered output is unchanged bar rounding: a single blend rounds once where four
+  rounded four times, so it sits closer to the exact wash (worst error 0.98/255 against
+  1.98). About 86% of colour samples move, two thirds of them by a single level out of
+  255 and none by more than three.
+
 ## [0.6.0] — 2026-08-14
 
 ### Added

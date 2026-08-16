@@ -53,21 +53,31 @@ def _output_path(rt, name, rotate):
     return a if ma <= mb else b
 
 
+def _umask():
+    """The process umask. Reading it requires setting it, so put it straight back."""
+    m = os.umask(0)
+    os.umask(m)
+    return m
+
+
 def _save_atomic(img, path):
     """Write `img` to `path` in one step, via a temp file in the same directory.
 
-    Desktops watch the wallpaper file and reload on write. A plain save truncates
-    the file and fills it over several hundred milliseconds at 4K, so a watcher that
-    fires on the first write reads a half-written PNG: GNOME logs an unhandled
-    promise rejection from background.js and keeps the partial load's buffers.
-    os.replace is atomic on POSIX and Windows, so a watcher sees either the old
-    image or the new one.
+    Desktops watch the wallpaper file and reload on write. Writing to it directly
+    truncates it and then fills it over the encode — several hundred milliseconds at
+    4K — so a watcher firing on the first write reads a PNG that stops mid-file.
+    os.replace is atomic on POSIX and Windows, so the watcher sees either the whole
+    previous image or the whole new one.
+
+    mkstemp creates the temp file 0600; the wallpaper is given the mode a plain
+    create would have, since some desktops paint it from a separate process.
     """
     d, base = os.path.dirname(path) or ".", os.path.basename(path)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=f".{base}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
             img.save(f, format="PNG")
+        os.chmod(tmp, 0o666 & ~_umask())
         os.replace(tmp, path)
     except BaseException:
         try:

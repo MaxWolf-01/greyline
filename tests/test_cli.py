@@ -1,11 +1,9 @@
 """CLI plumbing: DE recipe detection, systemd unit generation, init, watch loop."""
-import shutil
 
 import pytest
 
 from worldtime import __main__ as cli
 from worldtime import config, recipes, service
-
 
 # --- argument parsing ---
 
@@ -83,6 +81,16 @@ def test_output_path_pingpongs_between_two_buffers(tmp_path):
 
 # --- atomic wallpaper writes ---
 
+class _FakeImage:
+    """Stands in for a Pillow image, so a test can watch the destination during save."""
+
+    def __init__(self, on_save):
+        self._on_save = on_save
+
+    def save(self, f, format=None):
+        self._on_save(f)
+
+
 def test_save_atomic_writes_a_valid_png(tmp_path):
     from PIL import Image
     dest = tmp_path / "screen.png"
@@ -95,18 +103,17 @@ def test_save_atomic_writes_a_valid_png(tmp_path):
 
 def test_save_atomic_never_exposes_a_half_written_file(tmp_path):
     # A desktop watching the wallpaper path must read either the old image or the new
-    # one — never a truncated PNG. Encoding 4K takes hundreds of ms, so a plain save
-    # leaves a long window where the path holds an unreadable prefix.
+    # one — never a truncated PNG. Encoding 4K takes hundreds of ms, so writing to the
+    # path directly leaves a long window where it holds an unreadable prefix.
     dest = tmp_path / "screen-a.png"
     dest.write_bytes(b"OLD")
     observed = []
 
-    class Image:
-        def save(self, f, format=None):
-            observed.append(dest.read_bytes())  # what a watcher would see mid-encode
-            f.write(b"NEW-AND-LONGER")
+    def encode(f):
+        observed.append(dest.read_bytes())  # what a watcher would see mid-encode
+        f.write(b"NEW-AND-LONGER")
 
-    cli._save_atomic(Image(), str(dest))
+    cli._save_atomic(_FakeImage(encode), str(dest))
 
     assert observed == [b"OLD"]
     assert dest.read_bytes() == b"NEW-AND-LONGER"
@@ -117,15 +124,26 @@ def test_save_atomic_keeps_the_previous_image_when_encoding_fails(tmp_path):
     dest = tmp_path / "screen-a.png"
     dest.write_bytes(b"OLD")
 
-    class Image:
-        def save(self, f, format=None):
-            raise OSError("no space left on device")
+    def fail(_f):
+        raise OSError("no space left on device")
 
     with pytest.raises(OSError):
-        cli._save_atomic(Image(), str(dest))
+        cli._save_atomic(_FakeImage(fail), str(dest))
 
     assert dest.read_bytes() == b"OLD"  # a failed tick must not blank the desktop
     assert [p.name for p in tmp_path.iterdir()] == ["screen-a.png"]  # no temp left behind
+
+
+def test_save_atomic_publishes_the_wallpaper_readable(tmp_path, monkeypatch):
+    # mkstemp creates 0600. A desktop that paints the wallpaper from another process
+    # has to be able to read it, so the published file takes the umask-derived mode.
+    import os
+    import stat
+    from PIL import Image
+    monkeypatch.setattr(os, "umask", lambda _m: 0o022)
+    dest = tmp_path / "screen.png"
+    cli._save_atomic(Image.new("RGB", (2, 2)), str(dest))
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o644
 
 
 # --- init ---

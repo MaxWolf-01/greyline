@@ -118,27 +118,29 @@ def build_base(out_w, out_h, theme, font, to_px, ss=2, home_offset=None):
                 continue
             yield [(x + k, y) for x, y in pts] if k else pts
 
-    # The translucent overlays (GMT column, home column, timezone grid) each need their
-    # own layer so overlapping shapes within one blend once, not once per shape. They are
-    # composited and discarded in turn, so one scratch canvas serves all three: at 4K with
-    # ss=2 a canvas is ~147 MB, and allocating three costs that much peak RSS for nothing.
-    scratch = None
+    # The translucent overlays (GMT column, home column, timezone grid) each need a layer
+    # of their own, so that shapes overlapping inside one of them blend once rather than
+    # once per shape. They are composited and thrown away in turn, so one buffer serves
+    # all three; a supersampled canvas is the largest allocation in the renderer.
+    shared_overlay = None
 
-    def blank_layer():
-        nonlocal scratch
-        if scratch is None:
-            scratch = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    def cleared_overlay():
+        """The shared overlay buffer, wiped. The previous overlay's pixels do not survive
+        the call, so only one caller may hold it at a time."""
+        nonlocal shared_overlay
+        if shared_overlay is None:
+            shared_overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         else:
-            # Not Image.paste(colour, box): that builds a full-size temporary image of the
-            # colour and pastes it, which costs as much as the allocation being avoided.
-            # A rectangle is written scanline-wise, straight into the existing buffer.
-            ImageDraw.Draw(scratch).rectangle([0, 0, W, H], fill=(0, 0, 0, 0))
-        return scratch
+            # Not Image.paste(colour, box): that builds a full-size image of the colour
+            # and pastes it, costing the allocation this buffer exists to avoid. A
+            # rectangle is written straight into the existing pixels.
+            ImageDraw.Draw(shared_overlay).rectangle([0, 0, W, H], fill=(0, 0, 0, 0))
+        return shared_overlay
 
     def composite(layer):
-        # In place: Image.alpha_composite() would allocate yet another canvas. `d` keeps
-        # pointing at `img`, whose identity is preserved, so there is nothing to rebind.
-        img.alpha_composite(layer)
+        nonlocal img, d
+        img = Image.alpha_composite(img, layer)
+        d = ImageDraw.Draw(img)
 
     # Land fill (Antarctica included — the equator-centred frame puts its −90 data edge at
     # the very bottom, so it reads as the south pole rather than an ugly mid-map cut-off).
@@ -158,10 +160,10 @@ def build_base(out_w, out_h, theme, font, to_px, ss=2, home_offset=None):
     zones = _zone_features("ne_10m_time_zones.geojson")
 
     def fill_zone(offset, color):
-        """Fill every timezone polygon at `offset` (UTC hours) with `color`, on its own
-        layer (honest — follows the zig-zag boundary; the polar extent falls off the
+        """Fill every timezone polygon at `offset` (UTC hours) with `color`, on an
+        overlay (honest — follows the zig-zag boundary; the polar extent falls off the
         frame and is clipped by the canvas)."""
-        layer = blank_layer()
+        layer = cleared_overlay()
         zd = ImageDraw.Draw(layer)
         for zone, rings in zones:
             if zone is None or abs(zone - offset) > 0.01:
@@ -181,7 +183,7 @@ def build_base(out_w, out_h, theme, font, to_px, ss=2, home_offset=None):
         """Timezone boundaries: each zone polygon's meridional edges. Polar caps
         (horizontal edges at ±90) and antimeridian split seams (at ±180) are skipped so
         only the honest dividing lines remain."""
-        grid_layer = blank_layer()
+        grid_layer = cleared_overlay()
         ld = ImageDraw.Draw(grid_layer)
         gw = max(1, ss)
         for _zone, rings in zones:
@@ -221,9 +223,9 @@ def build_base(out_w, out_h, theme, font, to_px, ss=2, home_offset=None):
         for c in wrap_copies(pts):
             d.line(c, fill=idl, width=iw)
 
-    # Resizing 4x the output pixels needs a big intermediate of its own, so let the
-    # overlay canvas go first — nothing draws on it again.
-    scratch = None
+    # Downsampling the supersampled canvas needs a large intermediate of its own, and
+    # nothing draws on the overlay again, so release it first.
+    shared_overlay = None
     img = img.resize((out_w, out_h), Image.LANCZOS)
 
     # Per-column UTC-offset labels at the bottom, drawn at native res for crisp text.

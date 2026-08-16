@@ -40,7 +40,7 @@ a minute and hands it to your existing wallpaper mechanism, then exits.
 ## Features
 
 - **Multi-timezone clocks** at each city's real location, with accurate DST via the OS IANA
-  database (`zoneinfo`). 12h or 24h.
+  database (`zoneinfo`). 12h, 24h, or hour-only.
 - Home city accented (dot + bold label + optional timezone-column highlight), auto-detected
   from your system timezone or pinned in config.
 - Day/night terminator that's seasonally correct, with discrete civil / nautical / astronomical
@@ -227,7 +227,7 @@ template. Keys:
 | `backend` | `auto` / `sway` / `swww` / `hyprpaper` / `x11` / `command` |
 | `command`, `resolution` | for the `command` backend (see below) |
 | `map_style` | `vector` (default) / `raster` (bring your own art) |
-| `theme`, `format` | a built-in or custom theme name (see [Themes](#themes)) · `24h`/`12h` |
+| `theme`, `format` | a built-in or custom theme name (see [Themes](#themes)) · `24h`/`12h`/`hour` |
 | `font_family`, `font_scale` | label font (family name or file path) · text-size multiplier |
 | `logo`, `logo_path`, `logo_invert`, `logo_scale`, `logo_max_height` | corner logo (default: Tux); `logo_max_height` caps height as a fraction of screen height |
 | `[twilight]` | `bands`, `darkness` (`subtle`/`medium`/`dramatic`) |

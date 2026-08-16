@@ -1,6 +1,6 @@
 """End-to-end smoke: both map styles produce an RGB image of the requested size."""
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -10,7 +10,7 @@ CITIES = [
     {"name": "London", "lat": 51.51, "lon": -0.13, "tz": "Europe/London", "home": True},
     {"name": "Tokyo", "lat": 35.68, "lon": 139.69, "tz": "Asia/Tokyo", "home": False},
 ]
-DT = datetime(2024, 6, 20, 9, 30, tzinfo=timezone.utc)
+DT = datetime(2024, 6, 20, 9, 30, tzinfo=UTC)
 
 
 @pytest.mark.parametrize("style", ["raster", "vector"])
@@ -46,7 +46,7 @@ def test_home_column_uses_standard_offset(monkeypatch, tz, lon, month, expected)
 
     monkeypatch.setattr(render.vectormap, "build_base", spy)
     cities = [{"name": "Home", "lat": 0.0, "lon": lon, "tz": tz, "home": True}]
-    dt = datetime(2026, month, 15, 12, tzinfo=timezone.utc)
+    dt = datetime(2026, month, 15, 12, tzinfo=UTC)
     render.render(cities, dt=dt, out_size=(320, 200), map_style="vector")
     assert captured["home_offset"] == expected
 
@@ -86,6 +86,7 @@ def _overlay_night_stacked(base, dt, theme, bands, alpha, proj):
     side — and a picture that is merely plausible would hide it.
     """
     from PIL import Image, ImageChops, ImageDraw
+
     from worldtime import sun
 
     w, h = base.size
@@ -96,10 +97,9 @@ def _overlay_night_stacked(base, dt, theme, bands, alpha, proj):
         nonlocal base
         for elev in elevations:
             layer = Image.new("RGB", (w, h), base_color)
+            curve = render._terminator_curve(elev, sublat, sublon, proj, w, h)
             ImageDraw.Draw(layer).polygon(
-                render._terminator_polygon(elev, sublat, sublon, proj, w, h,
-                                           day_side=day_side),
-                fill=tint,
+                render._close_curve(curve, sublat, w, h, day_side), fill=tint,
             )
             base = render._blend_region(base, layer, op)
 
@@ -119,9 +119,10 @@ def _overlay_night_stacked(base, dt, theme, bands, alpha, proj):
 @pytest.mark.parametrize("darkness", ["subtle", "dramatic"])
 def test_collapsed_twilight_wash_matches_the_stacked_one(month, darkness):
     from PIL import Image, ImageChops
+
     from worldtime import themes
 
-    dt = datetime(2026, month, 21, 9, tzinfo=timezone.utc)
+    dt = datetime(2026, month, 21, 9, tzinfo=UTC)
     th = themes.load_theme("modus")
     alpha = render.DARKNESS_ALPHA[darkness]
     w, h = 400, 250
@@ -205,17 +206,17 @@ def test_logo_max_height_caps_tall_logos(tmp_path):
 )
 def test_hour_format_keeps_minutes_only_where_the_zone_needs_them(tz, expected):
     from zoneinfo import ZoneInfo
-    dt = datetime(2026, 8, 16, 12, 0, tzinfo=timezone.utc)
+    dt = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
     assert render._fmt_time(dt.astimezone(ZoneInfo(tz)), "hour") == expected
 
 
 def test_hour_format_does_not_change_within_an_hour():
-    # The whole point: on a whole-hour zone the label is stable between ticks, so the
-    # wallpaper only differs by the terminator moving.
+    # On a whole-hour zone the label is stable between ticks, so consecutive wallpapers
+    # differ only by the terminator moving.
     from zoneinfo import ZoneInfo
     vienna = ZoneInfo("Europe/Vienna")
     labels = {
-        render._fmt_time(datetime(2026, 8, 16, 12, m, tzinfo=timezone.utc).astimezone(vienna),
+        render._fmt_time(datetime(2026, 8, 16, 12, m, tzinfo=UTC).astimezone(vienna),
                          "hour")
         for m in range(0, 60, 7)
     }
