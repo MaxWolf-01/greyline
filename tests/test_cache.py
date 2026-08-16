@@ -73,3 +73,16 @@ def test_unwritable_cache_degrades_to_an_uncached_render(tmp_path, capsys):
         ro.chmod(0o700)
     assert img.tobytes() == plain.tobytes()
     assert "cache write failed" in capsys.readouterr().err
+
+
+def test_key_is_stable_with_the_bundled_fallback_font(tmp_path, monkeypatch):
+    """Without system fonts (e.g. a build sandbox) Pillow's load_default carries a
+    BytesIO in font.path; its repr is a fresh address each call and must not reach
+    the key, or every tick misses."""
+    from PIL import ImageFont
+
+    monkeypatch.setattr(render, "_load_font",
+                        lambda size, candidates, explicit=None: ImageFont.load_default(size))
+    _render(cache_dir=str(tmp_path))
+    _render(cache_dir=str(tmp_path))
+    assert len(_cache_files(tmp_path)) == 1

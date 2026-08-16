@@ -392,13 +392,21 @@ def _vector_base(out_w, out_h, theme, font, to_px, home_offset, cache_dir):
     sources = [vectormap.__file__] + [
         os.path.join(vectormap.GEO_DIR, f) for f in sorted(os.listdir(vectormap.GEO_DIR))
     ]
+    # Only stable values may enter the key — never the repr of an arbitrary object.
+    # font.path is a filesystem path for fonts loaded by name, but Pillow's bundled
+    # fallback (load_default) carries a BytesIO there, whose repr is a fresh memory
+    # address per process: hashing it would quietly turn every tick into a miss.
+    font_path = getattr(font, "path", None)
+    font_id = (font_path if isinstance(font_path, str) else None,
+               font.getname() if hasattr(font, "getname") else None,
+               getattr(font, "size", None))
     key = hashlib.sha256(repr((
         __version__,
         [(f, os.path.getmtime(f)) for f in sources],
         out_w, out_h,
         {k: tuple(theme[k]) for k in _BASE_THEME_KEYS},
         home_offset,
-        (getattr(font, "path", None), getattr(font, "size", None)),
+        font_id,
     )).encode()).hexdigest()[:16]
     path = os.path.join(cache_dir, f"base-{key}.png")
 
