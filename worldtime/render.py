@@ -199,12 +199,10 @@ def _screen_pow(tint, k):
 
 
 def _blend_region(base, layer_rgb, op):
-    """Apply a blend `op` (ImageChops.multiply / .screen) of `layer_rgb` onto `base`,
-    preserving base's alpha. The layer is a no-op colour everywhere except the band
-    polygon (white for multiply, black for screen), so only that region changes."""
-    mixed = op(base.convert("RGB"), layer_rgb)
-    mixed.putalpha(base.getchannel("A"))
-    return mixed
+    """Apply a blend `op` (ImageChops.multiply / .screen) of `layer_rgb` onto `base`
+    (RGB). The layer is a no-op colour everywhere except the band polygon (white for
+    multiply, black for screen), so only that region changes."""
+    return op(base, layer_rgb)
 
 
 def _overlay_night(base, dt, theme, bands, alpha, proj):
@@ -317,7 +315,9 @@ def _draw_logo(canvas, theme, logo_path, bar_height=0, logo_color=None, logo_inv
         logo = _recolor_dark(logo, tuple(theme.get("logo", (235, 235, 235))))
     pad = round(canvas.width * 0.018)
     x, y = pad, canvas.height - target_h - pad - bar_height
-    canvas.alpha_composite(logo, (x, y))
+    # paste-with-mask, not alpha_composite: over an opaque canvas they compute the
+    # same blend, and paste writes in place on RGB instead of allocating a result.
+    canvas.paste(logo, (x, y), logo)
     return (x, y, x + target_w, y + target_h)
 
 
@@ -449,7 +449,7 @@ def render(
         # so the straight-band fallback below is skipped for the vector style.
         canvas = vectormap.build_base(
             out_w, out_h, th, grid_font, proj.to_px, home_offset=home_offset
-        ).convert("RGBA")
+        )
     else:
         proj, (sc, cx, cy) = _raster_projection(out_w, out_h, crop_anchor)
         scale = sc
@@ -459,13 +459,13 @@ def render(
                 "art is not bundled (see NOTICE); use map_style=\"vector\" or supply your own "
                 "1400x1050 map via base_path."
             )
-        base = Image.open(base_path).convert("RGBA")  # the 1400x1050 calibration frame
+        base = Image.open(base_path).convert("RGB")  # the 1400x1050 calibration frame
         if desaturate:  # grayscale the blue artwork → a black-and-white map, then
             # contrast 150% + brightness 70% (darker) for a crisp, muted base.
             gray = ImageOps.grayscale(base)
             gray = ImageEnhance.Contrast(gray).enhance(1.5)
             gray = ImageEnhance.Brightness(gray).enhance(0.7)
-            base = gray.convert("RGBA")
+            base = gray.convert("RGB")
         scaled = base.resize((round(geo.REF_W * sc), round(geo.REF_H * sc)), Image.LANCZOS)
         canvas = scaled.crop((round(cx), round(cy), round(cx) + out_w, round(cy) + out_h))
 
@@ -476,11 +476,13 @@ def render(
         x0, _ = proj.to_px(home["lon"] - 7.5, home["lat"])
         x1, _ = proj.to_px(home["lon"] + 7.5, home["lat"])
         col_w = abs(x1 - x0)
-        band = Image.new("RGBA", (out_w, out_h), (0, 0, 0, 0))
+        col = tuple(th["column"])
+        band = Image.new("L", (out_w, out_h), 0)
         ImageDraw.Draw(band).rectangle(
-            [hx - col_w / 2, 0, hx + col_w / 2, out_h], fill=tuple(th["column"])
+            [hx - col_w / 2, 0, hx + col_w / 2, out_h],
+            fill=col[3] if len(col) > 3 else 255,
         )
-        canvas = Image.alpha_composite(canvas, band)
+        ImageDraw.Draw(canvas).bitmap((0, 0), band, fill=col[:3])
 
     # Day/night + twilight overlay (output space, via the projection).
     canvas = _overlay_night(canvas, dt, th, twilight_bands, alpha, proj)
@@ -525,18 +527,18 @@ def render(
                   (m, m, out_w - m, out_h - m - bar_height), scale)
 
     # Semi-transparent rounded backplate behind each label, for legibility over the map.
+    # One coverage mask for all plates: plates that overlap must darken once, not twice.
     if label_bg_alpha > 0 and items:
         pad_x = max(4, round(10 * scale * font_scale))
         pad_y = max(3, round(7 * scale * font_scale))
         rad = max(3, round(7 * scale * font_scale))
-        plate = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+        plate = Image.new("L", canvas.size, 0)
         pd = ImageDraw.Draw(plate)
         for it in items:
             bx0, by0, bx1, by1 = it["box"]
             pd.rounded_rectangle([bx0 - pad_x, by0 - pad_y, bx1 + pad_x, by1 + pad_y],
-                                 radius=rad, fill=(0, 0, 0, label_bg_alpha))
-        canvas = Image.alpha_composite(canvas, plate)
-        draw = ImageDraw.Draw(canvas)  # rebind to the composited canvas
+                                 radius=rad, fill=label_bg_alpha)
+        draw.bitmap((0, 0), plate, fill=(0, 0, 0))
 
     # Draw dots + labels at their placed boxes.
     for it in items:
@@ -554,4 +556,4 @@ def render(
             stroke_width=max(1, round(scale)), stroke_fill=stroke,
         )
 
-    return canvas.convert("RGB")
+    return canvas
