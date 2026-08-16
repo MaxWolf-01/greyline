@@ -467,9 +467,10 @@ def _fmt_time(local, fmt):
 
 
 def _label_lines(city, dt, fmt):
-    """City label: name + local time. Kept deliberately simple."""
+    """City label: name and local time on one line — a low, dot-hugging chip
+    instead of a tall two-line box over the map."""
     local = dt.astimezone(ZoneInfo(city["tz"]))
-    return [city["name"], _fmt_time(local, fmt)]
+    return [f"{city['name']} {_fmt_time(local, fmt)}"]
 
 
 def render(
@@ -484,7 +485,7 @@ def render(
     darkness="subtle",
     column_highlight=True,
     home_color=None,
-    label_bg_alpha=130,
+    label_bg_alpha=80,
     map_style="vector",
     logo=True,
     logo_path=None,

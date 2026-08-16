@@ -43,6 +43,10 @@ All notable changes to greyline are documented here. The format is based on
   opaque RGB throughout — which also spares Pillow's premultiplied copy of the
   supersampled canvas on every resize — and the night washes run strip by strip into
   the canvas. Output stays byte-identical, cached or not.
+- **City labels sit on one line with a lighter backplate.** "Vienna 14" beside the dot,
+  instead of a name-over-time stack on a heavy black box; the plate default drops from
+  130 to 80 alpha. `label_bg_alpha` still overrides, `label_background = false` still
+  removes the plate entirely.
 
 ## [0.6.0] — 2026-08-14
 

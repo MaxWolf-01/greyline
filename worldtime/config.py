@@ -97,7 +97,7 @@ def render_kwargs(cfg):
         "home_color": home.get("color"),
         "font_scale": float(cfg.get("font_scale", 1.0)),
         "label_bg_alpha": int(
-            cfg.get("label_bg_alpha", 130 if cfg.get("label_background", True) else 0)
+            cfg.get("label_bg_alpha", 80 if cfg.get("label_background", True) else 0)
         ),
         "map_style": cfg.get("map_style", "vector"),  # vector (default) | raster (bring your own art)
         "logo": bool(cfg.get("logo", True)),  # draw the bottom-left corner logo
