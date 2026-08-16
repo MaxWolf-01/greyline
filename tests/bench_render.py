@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Peak RSS and wall time for one render.
 
-    python tests/bench_render.py [WIDTHxHEIGHT]      # default 3840x2400
+    python tests/bench_render.py [WIDTHxHEIGHT] [CACHE_DIR]      # default 3840x2400
+
+With CACHE_DIR the render uses the base-map cache: the first invocation measures a
+cold tick (build + save), a second invocation of the same command a warm one —
+peak RSS only means anything per process, so the two must not share one.
 
 RSS is the number to watch: the renderer's cost is Pillow's image buffers, which
 are C allocations and so invisible to Python-level tools like tracemalloc. Both
@@ -29,11 +33,13 @@ CITIES = [
 
 def main():
     size = sys.argv[1] if len(sys.argv) > 1 else "3840x2400"
+    cache_dir = sys.argv[2] if len(sys.argv) > 2 else None
     w, h = (int(v) for v in size.lower().split("x"))
     dt = datetime(2026, 8, 16, 9, 0, tzinfo=timezone.utc)
 
     t0 = time.perf_counter()
-    img = render.render(CITIES, dt=dt, out_size=(w, h), map_style="vector", logo=False)
+    img = render.render(CITIES, dt=dt, out_size=(w, h), map_style="vector",
+                        logo=False, cache_dir=cache_dir)
     elapsed = time.perf_counter() - t0
     peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
 

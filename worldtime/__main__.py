@@ -33,6 +33,11 @@ def _runtime_dir():
     return d
 
 
+def _cache_dir():
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    return os.path.join(base, "greyline")
+
+
 def _output_path(rt, name, rotate):
     """PNG path for one output. Normally the stable ``{name}.png``.
 
@@ -116,7 +121,7 @@ def run_apply(args):
     if args.out:
         res = _parse_res(args.res) if args.res else (1920, 1200)
         img = render.render(cities, out_size=res, font_path=font,
-                            font_bold_path=font_bold, **rkw)
+                            font_bold_path=font_bold, cache_dir=_cache_dir(), **rkw)
         img.save(args.out)
         print(f"wrote {args.out} {img.size}")
         return 0
@@ -158,7 +163,8 @@ def run_apply(args):
         # (e.g. unplugged mid-run) must not blank the others.
         try:
             img = render.render(cities, out_size=(o["width"], o["height"]),
-                                font_path=font, font_bold_path=font_bold, **rkw)
+                                font_path=font, font_bold_path=font_bold,
+                                cache_dir=_cache_dir(), **rkw)
             path = _output_path(rt, o["name"], rotate)
             _save_atomic(img, path)
             mod.apply(o["name"], path)

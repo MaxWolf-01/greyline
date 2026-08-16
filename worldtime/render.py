@@ -5,14 +5,17 @@ day/night + twilight overlays and the home timezone-column highlight; cover-crop
 composited map to the target output size; then draw the city clocks at NATIVE output
 resolution so text stays crisp on HiDPI panels.
 """
+import hashlib
 import math
 import os
+import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
-from . import geo, sun, themes, vectormap
+from . import __version__, geo, sun, themes, vectormap
 from .themes import _hex  # re-exported here for back-compat (moved to themes.py)
 
 ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
@@ -369,6 +372,75 @@ def _place_labels(items, obstacles, bounds, scale):
         placed.append(best)
 
 
+# The vector base map — ocean, land, borders, zone fills, grid, IDL, offset labels —
+# depends on nothing that changes between timer ticks, yet building it is nearly all
+# of a render's time and memory (it is drawn supersampled, and each tick is a fresh
+# process). So it is memoised on disk, keyed by everything build_base reads.
+_BASE_THEME_KEYS = ("ocean", "land", "border", "grid", "grid_label", "gmt", "idl", "column")
+_BASE_CACHE_KEEP = 4  # e.g. two monitor sizes x a light and a dark theme
+
+
+def _vector_base(out_w, out_h, theme, font, to_px, home_offset, cache_dir):
+    if cache_dir is None:
+        return vectormap.build_base(out_w, out_h, theme, font, to_px,
+                                    home_offset=home_offset)
+    # Code and data identity: the package version plus the drawing module's and the
+    # geodata files' paths and mtimes. Under Nix the store path changes on any
+    # rebuild; for a pip/editable install the mtimes catch upgrades and edits.
+    sources = [vectormap.__file__] + [
+        os.path.join(vectormap.GEO_DIR, f) for f in sorted(os.listdir(vectormap.GEO_DIR))
+    ]
+    key = hashlib.sha256(repr((
+        __version__,
+        [(f, os.path.getmtime(f)) for f in sources],
+        out_w, out_h,
+        {k: tuple(theme[k]) for k in _BASE_THEME_KEYS},
+        home_offset,
+        (getattr(font, "path", None), getattr(font, "size", None)),
+    )).encode()).hexdigest()[:16]
+    path = os.path.join(cache_dir, f"base-{key}.png")
+
+    try:
+        img = Image.open(path)
+        img.load()
+        return img
+    except OSError:  # missing, truncated, or unreadable — rebuild and repair below
+        pass
+
+    img = vectormap.build_base(out_w, out_h, theme, font, to_px, home_offset=home_offset)
+    try:
+        _store_base(img, cache_dir, path)
+    except OSError as e:
+        # The cache is an optimisation: a full disk or unwritable directory must
+        # not take the wallpaper down with it. The render itself succeeded.
+        print(f"greyline: base-map cache write failed ({e}); continuing uncached",
+              file=sys.stderr)
+    return img
+
+
+def _store_base(img, cache_dir, path):
+    os.makedirs(cache_dir, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=cache_dir, prefix=".base-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            img.save(f, format="PNG")
+        os.replace(tmp, path)  # atomic: a concurrent reader sees a whole file or none
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    stale = sorted((e for e in os.scandir(cache_dir)
+                    if e.name.startswith("base-") and e.name.endswith(".png")),
+                   key=lambda e: e.stat().st_mtime, reverse=True)[_BASE_CACHE_KEEP:]
+    for e in stale:
+        try:
+            os.unlink(e.path)
+        except OSError:
+            pass
+
+
 def _fmt_time(local, fmt):
     if fmt == "hour":
         # Hour only. On a whole-hour zone the minutes match whatever clock the reader
@@ -417,6 +489,7 @@ def render(
     font_scale=1.0,
     base_path=BASE_1400,
     crop_anchor=(0.5, 1.0),
+    cache_dir=None,  # directory for the vector base-map cache; None renders fresh
 ):
     th = themes.load_theme(theme, overrides=theme_overrides)
     logo_path = logo_path or LOGO_PNG
@@ -447,9 +520,8 @@ def render(
         grid_font = _load_font(max(8, round(11 * scale)), FONT_CANDIDATES, font_path)
         # The home highlight fills the real zone polygon here (like the GMT column),
         # so the straight-band fallback below is skipped for the vector style.
-        canvas = vectormap.build_base(
-            out_w, out_h, th, grid_font, proj.to_px, home_offset=home_offset
-        )
+        canvas = _vector_base(out_w, out_h, th, grid_font, proj.to_px,
+                              home_offset, cache_dir)
     else:
         proj, (sc, cx, cy) = _raster_projection(out_w, out_h, crop_anchor)
         scale = sc
