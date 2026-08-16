@@ -53,6 +53,30 @@ def _output_path(rt, name, rotate):
     return a if ma <= mb else b
 
 
+def _save_atomic(img, path):
+    """Write `img` to `path` in one step, via a temp file in the same directory.
+
+    Desktops watch the wallpaper file and reload on write. A plain save truncates
+    the file and fills it over several hundred milliseconds at 4K, so a watcher that
+    fires on the first write reads a half-written PNG: GNOME logs an unhandled
+    promise rejection from background.js and keeps the partial load's buffers.
+    os.replace is atomic on POSIX and Windows, so a watcher sees either the old
+    image or the new one.
+    """
+    d, base = os.path.dirname(path) or ".", os.path.basename(path)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=f".{base}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            img.save(f, format="PNG")
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _parse_res(s):
     try:
         w, h = s.lower().split("x")
@@ -126,7 +150,7 @@ def run_apply(args):
             img = render.render(cities, out_size=(o["width"], o["height"]),
                                 font_path=font, font_bold_path=font_bold, **rkw)
             path = _output_path(rt, o["name"], rotate)
-            img.save(path)
+            _save_atomic(img, path)
             mod.apply(o["name"], path)
         except Exception as e:  # noqa: BLE001 — keep going for the remaining outputs
             failures += 1

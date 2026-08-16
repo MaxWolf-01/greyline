@@ -81,6 +81,53 @@ def test_output_path_pingpongs_between_two_buffers(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["screen-a.png", "screen-b.png"]
 
 
+# --- atomic wallpaper writes ---
+
+def test_save_atomic_writes_a_valid_png(tmp_path):
+    from PIL import Image
+    dest = tmp_path / "screen.png"
+    cli._save_atomic(Image.new("RGB", (4, 3), (1, 2, 3)), str(dest))
+    with Image.open(dest) as im:
+        assert im.format == "PNG"
+        assert im.size == (4, 3)
+    assert [p.name for p in tmp_path.iterdir()] == ["screen.png"]
+
+
+def test_save_atomic_never_exposes_a_half_written_file(tmp_path):
+    # A desktop watching the wallpaper path must read either the old image or the new
+    # one — never a truncated PNG. Encoding 4K takes hundreds of ms, so a plain save
+    # leaves a long window where the path holds an unreadable prefix.
+    dest = tmp_path / "screen-a.png"
+    dest.write_bytes(b"OLD")
+    observed = []
+
+    class Image:
+        def save(self, f, format=None):
+            observed.append(dest.read_bytes())  # what a watcher would see mid-encode
+            f.write(b"NEW-AND-LONGER")
+
+    cli._save_atomic(Image(), str(dest))
+
+    assert observed == [b"OLD"]
+    assert dest.read_bytes() == b"NEW-AND-LONGER"
+    assert [p.name for p in tmp_path.iterdir()] == ["screen-a.png"]
+
+
+def test_save_atomic_keeps_the_previous_image_when_encoding_fails(tmp_path):
+    dest = tmp_path / "screen-a.png"
+    dest.write_bytes(b"OLD")
+
+    class Image:
+        def save(self, f, format=None):
+            raise OSError("no space left on device")
+
+    with pytest.raises(OSError):
+        cli._save_atomic(Image(), str(dest))
+
+    assert dest.read_bytes() == b"OLD"  # a failed tick must not blank the desktop
+    assert [p.name for p in tmp_path.iterdir()] == ["screen-a.png"]  # no temp left behind
+
+
 # --- init ---
 
 def test_init_writes_config_and_detected_backend(monkeypatch, tmp_path):
