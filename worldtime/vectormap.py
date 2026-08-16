@@ -99,7 +99,10 @@ def build_base(out_w, out_h, theme, font, to_px, ss=2, home_offset=None):
     real polygon with the `column` colour (None disables).
     """
     W, H = out_w * ss, out_h * ss
-    img = Image.new("RGBA", (W, H), tuple(theme["ocean"]) + (255,))
+    # RGB, not RGBA: every pixel here is opaque, and resizing an RGBA image makes
+    # Pillow premultiply it first — a full extra copy of the supersampled canvas,
+    # which was the renderer's peak allocation.
+    img = Image.new("RGB", (W, H), tuple(theme["ocean"]))
     d = ImageDraw.Draw(img)
 
     def px(lon, lat):
@@ -118,39 +121,42 @@ def build_base(out_w, out_h, theme, font, to_px, ss=2, home_offset=None):
                 continue
             yield [(x + k, y) for x, y in pts] if k else pts
 
-    # The translucent overlays (GMT column, home column, timezone grid) each need a layer
-    # of their own, so that shapes overlapping inside one of them blend once rather than
-    # once per shape. They are composited and thrown away in turn, so one buffer serves
-    # all three; a supersampled canvas is the largest allocation in the renderer.
-    shared_overlay = None
+    # The translucent overlays (GMT column, home column, timezone grid) are each ONE
+    # colour, so a coverage mask carries everything an RGBA layer would: shapes
+    # overlapping inside one overlay overwrite the same mask value and still blend once.
+    # ImageDraw.bitmap blends the ink through the mask in place — byte-identical to
+    # alpha-compositing the equivalent layer over this opaque canvas — so the overlays
+    # cost one L buffer (a quarter of an RGBA layer) and no composite result canvas.
+    shared_mask = None
 
-    def cleared_overlay():
-        """The shared overlay buffer, wiped. The previous overlay's pixels do not survive
-        the call, so only one caller may hold it at a time."""
-        nonlocal shared_overlay
-        if shared_overlay is None:
-            shared_overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    def cleared_mask():
+        """The shared mask buffer, wiped. The previous overlay's coverage does not
+        survive the call, so only one caller may hold it at a time."""
+        nonlocal shared_mask
+        if shared_mask is None:
+            shared_mask = Image.new("L", (W, H), 0)
         else:
             # Not Image.paste(colour, box): that builds a full-size image of the colour
             # and pastes it, costing the allocation this buffer exists to avoid. A
             # rectangle is written straight into the existing pixels.
-            ImageDraw.Draw(shared_overlay).rectangle([0, 0, W, H], fill=(0, 0, 0, 0))
-        return shared_overlay
+            ImageDraw.Draw(shared_mask).rectangle([0, 0, W, H], fill=0)
+        return shared_mask
 
-    def composite(layer):
-        nonlocal img, d
-        img = Image.alpha_composite(img, layer)
-        d = ImageDraw.Draw(img)
+    def coverage(color):
+        """The wiped mask plus what to draw into it and blend through it: the colour's
+        alpha as the mask fill value, and its RGB (opaque) as the ink for d.bitmap."""
+        rgb, alpha = tuple(color[:3]), color[3] if len(color) > 3 else 255
+        return cleared_mask(), alpha, rgb
 
     # Land fill (Antarctica included — the equator-centred frame puts its −90 data edge at
     # the very bottom, so it reads as the south pole rather than an ugly mid-map cut-off).
-    land = tuple(theme["land"]) + (255,)
+    land = tuple(theme["land"])
     for ring in _outer_rings("ne_110m_land.geojson"):
         for c in wrap_copies([px(lon, lat) for lon, lat in ring]):
             d.polygon(c, fill=land)
 
     # Country borders (thin strokes).
-    border = tuple(theme["border"]) + (255,)
+    border = tuple(theme["border"])
     bw = max(1, round(ss))
     for ring in _outer_rings("ne_110m_admin_0_countries.geojson"):
         pts = [px(lon, lat) for lon, lat in ring]
@@ -160,18 +166,18 @@ def build_base(out_w, out_h, theme, font, to_px, ss=2, home_offset=None):
     zones = _zone_features("ne_10m_time_zones.geojson")
 
     def fill_zone(offset, color):
-        """Fill every timezone polygon at `offset` (UTC hours) with `color`, on an
-        overlay (honest — follows the zig-zag boundary; the polar extent falls off the
-        frame and is clipped by the canvas)."""
-        layer = cleared_overlay()
-        zd = ImageDraw.Draw(layer)
+        """Fill every timezone polygon at `offset` (UTC hours) with `color` (honest —
+        follows the zig-zag boundary; the polar extent falls off the frame and is
+        clipped by the canvas)."""
+        mask, alpha, ink = coverage(color)
+        zd = ImageDraw.Draw(mask)
         for zone, rings in zones:
             if zone is None or abs(zone - offset) > 0.01:
                 continue
             for ring in rings:
                 for c in wrap_copies([px(lon, lat) for lon, lat in ring]):
-                    zd.polygon(c, fill=tuple(color))
-        composite(layer)
+                    zd.polygon(c, fill=alpha)
+        d.bitmap((0, 0), mask, fill=ink)
 
     # Green UTC+0 column (GMT) + the home city's timezone column — both fill the real zone
     # polygons so the highlight follows the zig-zag boundaries, not a straight band.
@@ -183,8 +189,8 @@ def build_base(out_w, out_h, theme, font, to_px, ss=2, home_offset=None):
         """Timezone boundaries: each zone polygon's meridional edges. Polar caps
         (horizontal edges at ±90) and antimeridian split seams (at ±180) are skipped so
         only the honest dividing lines remain."""
-        grid_layer = cleared_overlay()
-        ld = ImageDraw.Draw(grid_layer)
+        mask, alpha, ink = coverage(theme["grid"])
+        ld = ImageDraw.Draw(mask)
         gw = max(1, ss)
         for _zone, rings in zones:
             for ring in rings:
@@ -207,16 +213,16 @@ def build_base(out_w, out_h, theme, font, to_px, ss=2, home_offset=None):
                                 run = [c[i]]
                             run.append(c[(i + 1) % n])
                         elif len(run) >= 2:
-                            ld.line(run, fill=tuple(theme["grid"]), width=gw)
+                            ld.line(run, fill=alpha, width=gw)
                             run = []
                     if len(run) >= 2:
-                        ld.line(run, fill=tuple(theme["grid"]), width=gw)
-        composite(grid_layer)
+                        ld.line(run, fill=alpha, width=gw)
+        d.bitmap((0, 0), mask, fill=ink)
 
     draw_grid()
 
     # International Date Line — red, on top, wrapped so the +180/−180 pieces join up.
-    idl = tuple(theme["idl"]) + (255,)
+    idl = tuple(theme["idl"])
     iw = max(2, round(2 * ss))
     for seg in _named_lines("ne_10m_geographic_lines.geojson", "Date Line"):
         pts = [px(lon, lat) for lon, lat in seg]
@@ -224,8 +230,8 @@ def build_base(out_w, out_h, theme, font, to_px, ss=2, home_offset=None):
             d.line(c, fill=idl, width=iw)
 
     # Downsampling the supersampled canvas needs a large intermediate of its own, and
-    # nothing draws on the overlay again, so release it first.
-    shared_overlay = None
+    # nothing draws through the mask again, so release it first.
+    shared_mask = None
     img = img.resize((out_w, out_h), Image.LANCZOS)
 
     # Per-column UTC-offset labels at the bottom, drawn at native res for crisp text.
