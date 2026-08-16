@@ -332,46 +332,55 @@ def _rect_overlap(a, b):
     return max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(0, min(a[3], b[3]) - max(a[1], b[1]))
 
 
-def _place_labels(items, obstacles, bounds, scale):
+def _place_labels(items, obstacles, bounds, scale, inflate=(0, 0)):
     """Assign each label a non-overlapping box around its dot (right/left/above/below).
 
     Greedy: home first, then left-to-right. Each label picks the candidate side with the
     least overlap against obstacles (dots, logo, screen edges) and already-placed labels.
     A city's `label_side` ("left"/"right"/"above"/"below") is tried first; it still falls
     back to another side rather than overlap badly or run off-screen.
+
+    `inflate` is the backplate's padding beyond the text box, per axis. Placement scores
+    and reserves the inflated boxes, so it keeps the PLATES apart — two labels whose
+    text boxes merely came close used to collide visibly plate-to-plate.
     """
     gap = round(6 * scale)
+    ix, iy = inflate
     placed = list(obstacles)
     order = sorted(range(len(items)), key=lambda i: (not items[i]["is_home"], items[i]["px"]))
     default_sides = ["right", "left", "below", "above", "below-right", "below-left"]
     for i in order:
         it = items[i]
-        px, py, w, h, g = it["px"], it["py"], it["w"], it["h"], it["dotr"] + gap
+        px, py, w, h = it["px"], it["py"], it["w"], it["h"]
+        # The text box anchors a plate-width further out, so the PLATE edge (not the
+        # text) sits `gap` from the dot — and the inflated box clears the dot box.
+        gx, gy = it["dotr"] + gap + ix, it["dotr"] + gap + iy
         anchors = {
-            "right": (px + g, py - h / 2),
-            "left": (px - g - w, py - h / 2),
-            "below": (px - w / 2, py + g),
-            "above": (px - w / 2, py - g - h),
-            "below-right": (px + g, py + g),
-            "below-left": (px - g - w, py + g),
+            "right": (px + gx, py - h / 2),
+            "left": (px - gx - w, py - h / 2),
+            "below": (px - w / 2, py + gy),
+            "above": (px - w / 2, py - gy - h),
+            "below-right": (px + gx, py + gy),
+            "below-left": (px - gx - w, py + gy),
         }
         pref = it.get("side")
         sides = ([pref] + [s for s in default_sides if s != pref]
                  if pref in anchors else default_sides)
         candidates = [anchors[s] for s in sides]
-        best, best_pen = None, None
+        best, best_big, best_pen = None, None, None
         for bx, by in candidates:
             box = (bx, by, bx + w, by + h)
-            pen = sum(_rect_overlap(box, o) for o in placed)
-            off = (max(0, bounds[0] - bx) + max(0, (bx + w) - bounds[2])
-                   + max(0, bounds[1] - by) + max(0, (by + h) - bounds[3]))
+            big = (bx - ix, by - iy, bx + w + ix, by + h + iy)
+            pen = sum(_rect_overlap(big, o) for o in placed)
+            off = (max(0, bounds[0] - big[0]) + max(0, big[2] - bounds[2])
+                   + max(0, bounds[1] - big[1]) + max(0, big[3] - bounds[3]))
             pen += off * (w + h) * 3  # heavily penalise going off-screen
             if best_pen is None or pen < best_pen:
-                best, best_pen = box, pen
+                best, best_big, best_pen = box, big, pen
             if pen == 0:
                 break
         it["box"] = best
-        placed.append(best)
+        placed.append(best_big)
 
 
 # The vector base map — ocean, land, borders, zone fills, grid, IDL, offset labels —
@@ -603,17 +612,20 @@ def render(
         })
 
     # Place labels avoiding dots, the logo box, the screen edges and each other.
+    # The backplate extends pad_x/pad_y beyond each text box, so placement must keep
+    # that much extra distance or the plates touch even when the text boxes do not.
+    pad_x = max(4, round(10 * scale * font_scale)) if label_bg_alpha > 0 else 0
+    pad_y = max(3, round(7 * scale * font_scale)) if label_bg_alpha > 0 else 0
     dot_boxes = [(it["px"] - it["dotr"], it["py"] - it["dotr"],
                   it["px"] + it["dotr"], it["py"] + it["dotr"]) for it in items]
     m = round(10 * scale)
     _place_labels(items, obstacles + dot_boxes,
-                  (m, m, out_w - m, out_h - m - bar_height), scale)
+                  (m, m, out_w - m, out_h - m - bar_height), scale,
+                  inflate=(pad_x, pad_y))
 
     # Semi-transparent rounded backplate behind each label, for legibility over the map.
     # One coverage mask for all plates: plates that overlap must darken once, not twice.
     if label_bg_alpha > 0 and items:
-        pad_x = max(4, round(10 * scale * font_scale))
-        pad_y = max(3, round(7 * scale * font_scale))
         rad = max(3, round(7 * scale * font_scale))
         plate = Image.new("L", canvas.size, 0)
         pd = ImageDraw.Draw(plate)

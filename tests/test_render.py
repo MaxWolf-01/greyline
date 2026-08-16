@@ -242,3 +242,20 @@ def test_hour_format_does_not_change_within_an_hour():
         for m in range(0, 60, 7)
     }
     assert labels == {"14"}
+
+
+def test_label_placement_keeps_backplates_apart():
+    """Two chips whose text boxes clear each other can still collide plate-to-plate:
+    the backplate pads beyond the box. Placement must hold the inflated boxes apart
+    (the London/Vienna geometry that shipped overlapping)."""
+    items = [
+        {"is_home": True, "px": 200, "py": 100, "w": 80, "h": 20, "dotr": 4},
+        {"is_home": False, "px": 100, "py": 102, "w": 80, "h": 20, "dotr": 4},
+    ]
+    render._place_labels(items, [], (0, 0, 1000, 500), scale=1.0, inflate=(15, 10))
+
+    def plate(box):
+        return (box[0] - 15, box[1] - 10, box[2] + 15, box[3] + 10)
+
+    a, b = items[0]["box"], items[1]["box"]
+    assert render._rect_overlap(plate(a), plate(b)) == 0
