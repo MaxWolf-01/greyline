@@ -26,8 +26,9 @@ All notable changes to greyline are documented here. The format is based on
 - **A 4K render costs about a fifth less memory and time.** At 3840x2400 peak RSS drops
   from ~577 MB to ~471 MB, measured over five runs. The three translucent overlays share
   one buffer instead of allocating one each, that buffer is released before the
-  supersampled canvas is downsampled, and the four stacked twilight blends collapse into
-  one per side — the bands nest, and multiply and screen both compose to a closed form.
+  supersampled canvas is downsampled, and the four stacked twilight blends become one per
+  side — multiply and screen both compose to a closed form, so counting how many bands
+  cover a pixel gives the tint it ends up with directly.
   Rendered output is unchanged bar rounding: a single blend rounds once where four
   rounded four times, so it sits closer to the exact wash (worst error 0.98/255 against
   1.98). About 86% of colour samples move, two thirds of them by a single level out of

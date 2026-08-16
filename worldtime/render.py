@@ -55,7 +55,7 @@ def _load_font(size, candidates, explicit=None):
             continue
         try:
             return ImageFont.truetype(name, size)
-        except OSError:
+        except (OSError, IOError):
             continue
     return ImageFont.load_default(size)
 
@@ -175,29 +175,36 @@ def _overlay_night(base, dt, theme, bands, alpha, proj):
     The civil/nautical/astronomical elevations make each twilight band a distinct step: a
     pixel `k` bands deep is washed `k` times.
 
-    Those bands nest, and multiply and screen each compose to a closed form
-    (_multiply_pow / _screen_pow), so one blend per side suffices. The nested polygons are
-    painted outermost-first into a single layer, each with the tint its depth calls for.
-    Blending per band instead would allocate a full-canvas image per band, and a canvas is
-    the largest allocation in the renderer.
+    Multiply and screen each compose to a closed form (_multiply_pow / _screen_pow), so
+    one blend per side suffices: count how many bands reach each pixel, turn that count
+    into the tint it earns, blend once. Blending band by band instead would allocate a
+    full-canvas RGB image per band, and a canvas is the largest allocation in the
+    renderer; the counters are one byte per pixel.
     """
     w, h = base.size
     sublat, sublon = sun.subsolar_point(dt)
     elevations = TWILIGHT_ELEVATIONS if bands else (0.0,)
     curves = {e: _terminator_curve(e, sublat, sublon, proj, w, h) for e in elevations}
 
-    def stack(day_side, base_color, tint, op, cumulative):
+    def stack(day_side, tint, op, cumulative):
         nonlocal base
-        # Outermost band first. The lit side GROWS as the elevation drops (more of the
-        # map counts as "brighter than -18" than as "brighter than 0"); the dark side
-        # shrinks. Drawn in that order each polygon overpaints the previous, so the k-th
-        # one drawn covers exactly the region that k bands reach.
-        order = tuple(reversed(elevations)) if day_side else elevations
-        layer = Image.new("RGB", (w, h), base_color)
-        d = ImageDraw.Draw(layer)
-        for k, elev in enumerate(order, start=1):
-            d.polygon(_close_curve(curves[elev], sublat, w, h, day_side),
-                      fill=cumulative(tint, k))
+        # Count coverage rather than painting the bands over each other. Between the
+        # autumn and spring equinoxes the subsolar latitude passes through the twilight
+        # elevations themselves, and there the iso-lines cross instead of nesting — a
+        # deeper band painted last would then claim pixels the shallower ones never
+        # reached. Counting is indifferent to the geometry, and to draw order.
+        depth = Image.new("L", (w, h), 0)
+        for elev in elevations:
+            band = Image.new("L", (w, h), 0)
+            ImageDraw.Draw(band).polygon(
+                _close_curve(curves[elev], sublat, w, h, day_side), fill=1)
+            depth = ImageChops.add(depth, band)
+        # cumulative(tint, 0) is the blend's no-op colour, so uncovered pixels pass through.
+        steps = [cumulative(tint, k) for k in range(len(elevations) + 1)]
+        layer = Image.merge("RGB", [
+            depth.point([steps[min(k, len(elevations))][c] for k in range(256)])
+            for c in range(3)
+        ])
         base = _blend_region(base, layer, op)
 
     # Day side: SCREEN a light tint (the wash colour scaled by its alpha); black = no-op.
@@ -205,8 +212,7 @@ def _overlay_night(base, dt, theme, bands, alpha, proj):
     if dw:
         a = dw[3] if len(dw) > 3 else 255
         tint = tuple(round(c * a / 255) for c in dw[:3])
-        stack(day_side=True, base_color=(0, 0, 0), tint=tint, op=ImageChops.screen,
-              cumulative=_screen_pow)
+        stack(day_side=True, tint=tint, op=ImageChops.screen, cumulative=_screen_pow)
 
     # Night side: MULTIPLY toward the night colour; white = no-op. The per-band multiplier
     # is the night colour pulled toward white by `alpha` (so a stack of bands darkens
@@ -215,8 +221,8 @@ def _overlay_night(base, dt, theme, bands, alpha, proj):
     if alpha > 0 and night:
         t = alpha / 255.0
         tint = tuple(round(255 - (255 - c) * t) for c in night)
-        stack(day_side=False, base_color=(255, 255, 255), tint=tint,
-              op=ImageChops.multiply, cumulative=_multiply_pow)
+        stack(day_side=False, tint=tint, op=ImageChops.multiply,
+              cumulative=_multiply_pow)
     return base
 
 

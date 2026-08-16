@@ -11,7 +11,7 @@ run each a few times, rather than quoting an absolute.
 import resource
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 sys.path.insert(0, ".")
 from worldtime import render
@@ -30,7 +30,7 @@ CITIES = [
 def main():
     size = sys.argv[1] if len(sys.argv) > 1 else "3840x2400"
     w, h = (int(v) for v in size.lower().split("x"))
-    dt = datetime(2026, 8, 16, 9, 0, tzinfo=UTC)
+    dt = datetime(2026, 8, 16, 9, 0, tzinfo=timezone.utc)
 
     t0 = time.perf_counter()
     img = render.render(CITIES, dt=dt, out_size=(w, h), map_style="vector", logo=False)

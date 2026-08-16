@@ -1,6 +1,6 @@
 """End-to-end smoke: both map styles produce an RGB image of the requested size."""
 import os
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -10,7 +10,7 @@ CITIES = [
     {"name": "London", "lat": 51.51, "lon": -0.13, "tz": "Europe/London", "home": True},
     {"name": "Tokyo", "lat": 35.68, "lon": 139.69, "tz": "Asia/Tokyo", "home": False},
 ]
-DT = datetime(2024, 6, 20, 9, 30, tzinfo=UTC)
+DT = datetime(2024, 6, 20, 9, 30, tzinfo=timezone.utc)
 
 
 @pytest.mark.parametrize("style", ["raster", "vector"])
@@ -46,7 +46,7 @@ def test_home_column_uses_standard_offset(monkeypatch, tz, lon, month, expected)
 
     monkeypatch.setattr(render.vectormap, "build_base", spy)
     cities = [{"name": "Home", "lat": 0.0, "lon": lon, "tz": tz, "home": True}]
-    dt = datetime(2026, month, 15, 12, tzinfo=UTC)
+    dt = datetime(2026, month, 15, 12, tzinfo=timezone.utc)
     render.render(cities, dt=dt, out_size=(320, 200), map_style="vector")
     assert captured["home_offset"] == expected
 
@@ -56,9 +56,10 @@ def test_home_column_uses_standard_offset(monkeypatch, tz, lon, month, expected)
 @pytest.mark.parametrize("tint", [210, 235, 250])
 @pytest.mark.parametrize("k", [1, 2, 3, 4])
 def test_multiply_pow_matches_stacked_multiplies(tint, k):
-    # _overlay_night paints k nested bands into one layer instead of blending k times.
-    # The cumulative tint must reproduce what k stacked ImageChops.multiply passes did,
-    # or twilight steps shift. Pillow rounds each pass, so allow that drift.
+    # _overlay_night blends once, tinting each pixel by how many bands cover it, rather
+    # than blending once per band. The cumulative tint must reproduce what k stacked
+    # ImageChops.multiply passes did, or twilight steps shift. Pillow rounds each pass,
+    # so allow that drift.
     for base in range(0, 256, 7):
         stacked = base
         for _ in range(k):
@@ -79,11 +80,11 @@ def test_screen_pow_matches_stacked_screens(tint, k):
 
 
 def _overlay_night_stacked(base, dt, theme, bands, alpha, proj):
-    """The pre-collapse overlay: one full-canvas layer and one blend per band.
+    """One full-canvas layer and one blend per band — the definition of the wash.
 
-    Kept here as the reference the single-blend version must reproduce. Nesting order
-    is the easy thing to get wrong — the lit side nests the opposite way from the dark
-    side — and a picture that is merely plausible would hide it.
+    _overlay_night produces the same picture from a single blend. That is a real
+    optimisation with a real failure mode, and a rendered map that merely looks
+    plausible hides it, so the two are compared pixel for pixel.
     """
     from PIL import Image, ImageChops, ImageDraw
 
@@ -115,14 +116,28 @@ def _overlay_night_stacked(base, dt, theme, bands, alpha, proj):
     return base
 
 
-@pytest.mark.parametrize("month", [6, 12])  # night south of the terminator, then north
+# Dates chosen by subsolar latitude, which is what the band geometry turns on. Between
+# the equinoxes the sun's declination passes through the twilight elevations themselves
+# (0 down to -18); there the iso-lines cross rather than nest, and a version that assumes
+# nesting paints deep-night tint over ground no band reaches. Solstices alone miss it —
+# they are the two regimes where nesting happens to hold.
+@pytest.mark.parametrize(
+    "month, day",
+    [
+        (6, 21),   # sublat +23.4, night south
+        (12, 21),  # sublat -23.4, night north
+        (2, 20),   # sublat ~-11, inside the twilight band: iso-lines cross
+        (3, 21),   # sublat ~0, the degenerate equinox
+        (10, 15),  # sublat ~-8, crossing again on the way south
+    ],
+)
 @pytest.mark.parametrize("darkness", ["subtle", "dramatic"])
-def test_collapsed_twilight_wash_matches_the_stacked_one(month, darkness):
+def test_collapsed_twilight_wash_matches_the_stacked_one(month, day, darkness):
     from PIL import Image, ImageChops
 
     from worldtime import themes
 
-    dt = datetime(2026, month, 21, 9, tzinfo=UTC)
+    dt = datetime(2026, month, day, 9, tzinfo=timezone.utc)
     th = themes.load_theme("modus")
     alpha = render.DARKNESS_ALPHA[darkness]
     w, h = 400, 250
@@ -136,9 +151,9 @@ def test_collapsed_twilight_wash_matches_the_stacked_one(month, darkness):
     diff = ImageChops.difference(got.convert("RGB"), want.convert("RGB"))
     worst = max(hi for _lo, hi in diff.getextrema())
     # Pillow rounds every blend, so four stacked passes drift from the exact wash more
-    # than one pass does; the collapsed version is the closer of the two. Anything past
-    # a few levels means the bands are nested or counted wrongly, not rounded away.
-    assert worst <= 3, f"collapsed wash differs from the stacked one by {worst}/255"
+    # than one pass does; the single pass is the closer of the two. Anything past a few
+    # levels means the bands are counted wrongly, not rounded away.
+    assert worst <= 3, f"single-pass wash differs from the stacked one by {worst}/255"
 
 
 def test_unknown_theme_falls_back():
@@ -206,7 +221,7 @@ def test_logo_max_height_caps_tall_logos(tmp_path):
 )
 def test_hour_format_keeps_minutes_only_where_the_zone_needs_them(tz, expected):
     from zoneinfo import ZoneInfo
-    dt = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
+    dt = datetime(2026, 8, 16, 12, 0, tzinfo=timezone.utc)
     assert render._fmt_time(dt.astimezone(ZoneInfo(tz)), "hour") == expected
 
 
@@ -216,7 +231,7 @@ def test_hour_format_does_not_change_within_an_hour():
     from zoneinfo import ZoneInfo
     vienna = ZoneInfo("Europe/Vienna")
     labels = {
-        render._fmt_time(datetime(2026, 8, 16, 12, m, tzinfo=UTC).astimezone(vienna),
+        render._fmt_time(datetime(2026, 8, 16, 12, m, tzinfo=timezone.utc).astimezone(vienna),
                          "hour")
         for m in range(0, 60, 7)
     }
