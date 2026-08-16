@@ -5,6 +5,7 @@ day/night + twilight overlays and the home timezone-column highlight; cover-crop
 composited map to the target output size; then draw the city clocks at NATIVE output
 resolution so text stays crisp on HiDPI panels.
 """
+import math
 import os
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -67,10 +68,11 @@ class Projection:
     both map styles look consistent.
     """
 
-    def __init__(self, to_px, x_to_lon, lat_to_y, scale):
+    def __init__(self, to_px, x_to_lon, lat_to_y, y_to_lat, scale):
         self.to_px = to_px
         self.x_to_lon = x_to_lon
         self.lat_to_y = lat_to_y
+        self.y_to_lat = y_to_lat
         self.scale = scale
 
 
@@ -94,6 +96,7 @@ def _raster_projection(out_w, out_h, anchor):
         to_px,
         x_to_lon=lambda x: geo.x_to_lon((x + cx) / sc),
         lat_to_y=lambda lat: geo.lat_to_y(lat) * sc - cy,
+        y_to_lat=lambda y: geo.y_to_lat((y + cy) / sc),
         scale=sc,
     )
     return proj, (sc, cx, cy)
@@ -118,29 +121,74 @@ def _vector_projection(out_w, out_h):
                                 cy + (VECTOR_LAT_CENTER - lat) * ppd_lat),
         x_to_lon=lambda x: VECTOR_LON_CENTER + (x - cx) / ppd_lon,
         lat_to_y=lambda lat: cy + (VECTOR_LAT_CENTER - lat) * ppd_lat,
+        y_to_lat=lambda y: VECTOR_LAT_CENTER - (y - cy) / ppd_lat,
         scale=out_w / geo.REF_W,
     )
 
 
-def _terminator_curve(elevation, sublat, sublon, proj, w, h, step=3):
-    """The `elevation` iso-line as output px, sampled left to right across the canvas.
+def _arc_half_width(sin_elev, along, across):
+    """Half the span of longitude, in degrees, that is darker than `sin_elev` in a row.
 
-    Shared by the day and night polygons for that elevation — they differ only in which
-    edge closes them, so the trigonometry runs once per elevation instead of twice.
+    Solar elevation across one row of pixels is
+
+        sin(elev) = along + across * cos(lon - sublon)
+
+    with `along` = sin(lat)sin(dec) and `across` = cos(lat)cos(dec), both fixed for
+    that row. Everything darker than the threshold therefore lies in one arc centred
+    on the antisolar meridian, and inverting the cosine gives its half width: 180 for
+    a row that is entirely dark, 0 for one the shadow never reaches.
     """
-    pts = []
-    x = 0
-    while x <= w:
-        lat = sun.boundary_lat(proj.x_to_lon(x), sublat, sublon, elevation)
-        pts.append((x, max(0.0, min(float(h), proj.lat_to_y(lat)))))
-        x += step
-    return pts
+    if across <= 1e-12:  # a polar row: elevation does not vary along it
+        return 180.0 if along < sin_elev else 0.0
+    cos_hour_angle = (sin_elev - along) / across
+    if cos_hour_angle >= 1.0:
+        return 180.0
+    if cos_hour_angle <= -1.0:
+        return 0.0
+    return 180.0 - math.degrees(math.acos(cos_hour_angle))
 
 
-def _close_curve(curve, sublat, w, h, day_side):
-    """Close an iso-line into the polygon for the dark side (or the lit side)."""
-    close_bottom = sun.night_is_south(sublat) != day_side
-    return curve + ([(w, h), (0, h)] if close_bottom else [(w, 0), (0, 0)])
+def _band_depth(w, h, proj, sublat, sublon, elevations):
+    """How many of `elevations` each pixel lies below, as an "L" image.
+
+    `elevations` must run from brightest to darkest; each arc then sits inside the one
+    before it, so painting them in order leaves every pixel holding its own depth.
+
+    Drawing the bands as rows of arcs rather than as polygons under a boundary curve
+    is what makes this correct everywhere. A curve has to be closed against one edge of
+    the canvas, which presumes the dark region reaches a pole — false for the deep
+    bands when the sun is within 18 degrees of the equator, and the closure also
+    inherited a latent branch error in sun.boundary_lat for a sun south of it.
+    """
+    dec = math.radians(sublat)
+    sin_dec, cos_dec = math.sin(dec), math.cos(dec)
+    antisolar_x = proj.to_px(sublon + 180.0, 0.0)[0]
+    # Pixels per degree of longitude, and the width of one full turn around the globe.
+    # Both projections are affine in longitude, so this is exact. The arcs are drawn at
+    # every whole-turn offset as well, since the canvas need not start at the seam.
+    px_per_degree = abs(proj.to_px(1.0, 0.0)[0] - proj.to_px(0.0, 0.0)[0])
+    period = 360.0 * px_per_degree
+    turns = int(w / period) + 2
+    copies = [i * period for i in range(-turns, turns + 1)]
+
+    depth = Image.new("L", (w, h), 0)
+    draw = ImageDraw.Draw(depth)
+
+    for y in range(h):
+        lat = math.radians(proj.y_to_lat(y + 0.5))
+        along = sin_dec * math.sin(lat)
+        across = cos_dec * math.cos(lat)
+        for k, elev in enumerate(elevations, start=1):
+            half = _arc_half_width(math.sin(math.radians(elev)), along, across)
+            if half <= 0.0:
+                break  # this arc is empty, and every deeper one is narrower still
+            half_px = half * px_per_degree
+            for shift in copies:
+                x0 = max(0.0, antisolar_x - half_px + shift)
+                x1 = min(float(w - 1), antisolar_x + half_px + shift)
+                if x0 <= x1:
+                    draw.rectangle([x0, y, x1, y], fill=k)
+    return depth
 
 
 def _multiply_pow(tint, k):
@@ -176,43 +224,35 @@ def _overlay_night(base, dt, theme, bands, alpha, proj):
     pixel `k` bands deep is washed `k` times.
 
     Multiply and screen each compose to a closed form (_multiply_pow / _screen_pow), so
-    one blend per side suffices: count how many bands reach each pixel, turn that count
+    one blend per side suffices: take how many bands reach each pixel, turn that count
     into the tint it earns, blend once. Blending band by band instead would allocate a
     full-canvas RGB image per band, and a canvas is the largest allocation in the
-    renderer; the counters are one byte per pixel.
+    renderer; the depth map is one byte per pixel.
     """
     w, h = base.size
     sublat, sublon = sun.subsolar_point(dt)
     elevations = TWILIGHT_ELEVATIONS if bands else (0.0,)
-    curves = {e: _terminator_curve(e, sublat, sublon, proj, w, h) for e in elevations}
+    deepest = len(elevations)
+    # A pixel below `d` bands is above the other `deepest - d`, so one depth map drives
+    # both washes and they cannot disagree about where the terminator runs.
+    depth = _band_depth(w, h, proj, sublat, sublon, elevations)
 
-    def stack(day_side, tint, op, cumulative):
+    def wash(lit, tint, op, cumulative):
         nonlocal base
-        # Count coverage rather than painting the bands over each other. Between the
-        # autumn and spring equinoxes the subsolar latitude passes through the twilight
-        # elevations themselves, and there the iso-lines cross instead of nesting — a
-        # deeper band painted last would then claim pixels the shallower ones never
-        # reached. Counting is indifferent to the geometry, and to draw order.
-        depth = Image.new("L", (w, h), 0)
-        for elev in elevations:
-            band = Image.new("L", (w, h), 0)
-            ImageDraw.Draw(band).polygon(
-                _close_curve(curves[elev], sublat, w, h, day_side), fill=1)
-            depth = ImageChops.add(depth, band)
-        # cumulative(tint, 0) is the blend's no-op colour, so uncovered pixels pass through.
-        steps = [cumulative(tint, k) for k in range(len(elevations) + 1)]
-        layer = Image.merge("RGB", [
-            depth.point([steps[min(k, len(elevations))][c] for k in range(256)])
-            for c in range(3)
-        ])
-        base = _blend_region(base, layer, op)
+        # cumulative(tint, 0) is the blend's no-op colour, so untouched pixels pass through.
+        steps = [cumulative(tint, k) for k in range(deepest + 1)]
+        def channel(c):
+            return [steps[deepest - d if lit else d][c]
+                    for d in (min(v, deepest) for v in range(256))]
+        base = _blend_region(base, Image.merge("RGB", [depth.point(channel(c))
+                                                       for c in range(3)]), op)
 
     # Day side: SCREEN a light tint (the wash colour scaled by its alpha); black = no-op.
     dw = theme.get("day_wash")
     if dw:
         a = dw[3] if len(dw) > 3 else 255
         tint = tuple(round(c * a / 255) for c in dw[:3])
-        stack(day_side=True, tint=tint, op=ImageChops.screen, cumulative=_screen_pow)
+        wash(lit=True, tint=tint, op=ImageChops.screen, cumulative=_screen_pow)
 
     # Night side: MULTIPLY toward the night colour; white = no-op. The per-band multiplier
     # is the night colour pulled toward white by `alpha` (so a stack of bands darkens
@@ -221,8 +261,7 @@ def _overlay_night(base, dt, theme, bands, alpha, proj):
     if alpha > 0 and night:
         t = alpha / 255.0
         tint = tuple(round(255 - (255 - c) * t) for c in night)
-        stack(day_side=False, tint=tint, op=ImageChops.multiply,
-              cumulative=_multiply_pow)
+        wash(lit=False, tint=tint, op=ImageChops.multiply, cumulative=_multiply_pow)
     return base
 
 

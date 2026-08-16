@@ -51,7 +51,7 @@ def test_home_column_uses_standard_offset(monkeypatch, tz, lon, month, expected)
     assert captured["home_offset"] == expected
 
 
-# --- twilight wash: one blend must equal the stack it replaces ---
+# --- twilight wash ---
 
 @pytest.mark.parametrize("tint", [210, 235, 250])
 @pytest.mark.parametrize("k", [1, 2, 3, 4])
@@ -79,81 +79,87 @@ def test_screen_pow_matches_stacked_screens(tint, k):
         assert abs(collapsed - stacked) <= 3
 
 
-def _overlay_night_stacked(base, dt, theme, bands, alpha, proj):
-    """One full-canvas layer and one blend per band — the definition of the wash.
+def _true_band_depth(w, h, proj, sublat, sublon, elevations):
+    """Bands below each pixel, straight from the solar-elevation equation.
 
-    _overlay_night produces the same picture from a single blend. That is a real
-    optimisation with a real failure mode, and a rendered map that merely looks
-    plausible hides it, so the two are compared pixel for pixel.
+    No projection tricks, no polygons — evaluate
+
+        sin(elev) = sin(lat)sin(dec) + cos(lat)cos(dec)cos(lon - sublon)
+
+    at each pixel and count the thresholds it falls under. Slow, and the definition
+    the renderer's row-of-arcs version has to reproduce.
     """
-    from PIL import Image, ImageChops, ImageDraw
+    import math
 
-    from worldtime import sun
+    from PIL import Image
 
-    w, h = base.size
-    sublat, sublon = sun.subsolar_point(dt)
-    elevations = render.TWILIGHT_ELEVATIONS if bands else (0.0,)
-
-    def stack(day_side, base_color, tint, op):
-        nonlocal base
-        for elev in elevations:
-            layer = Image.new("RGB", (w, h), base_color)
-            curve = render._terminator_curve(elev, sublat, sublon, proj, w, h)
-            ImageDraw.Draw(layer).polygon(
-                render._close_curve(curve, sublat, w, h, day_side), fill=tint,
-            )
-            base = render._blend_region(base, layer, op)
-
-    dw = theme.get("day_wash")
-    if dw:
-        a = dw[3] if len(dw) > 3 else 255
-        stack(True, (0, 0, 0), tuple(round(c * a / 255) for c in dw[:3]), ImageChops.screen)
-    night = theme.get("night")
-    if alpha > 0 and night:
-        t = alpha / 255.0
-        stack(False, (255, 255, 255),
-              tuple(round(255 - (255 - c) * t) for c in night), ImageChops.multiply)
-    return base
+    dec = math.radians(sublat)
+    sin_dec, cos_dec = math.sin(dec), math.cos(dec)
+    thresholds = sorted(math.sin(math.radians(e)) for e in elevations)
+    out = Image.new("L", (w, h), 0)
+    px = out.load()
+    for y in range(h):
+        lat = math.radians(proj.y_to_lat(y + 0.5))
+        sin_lat, cos_lat = math.sin(lat), math.cos(lat)
+        for x in range(w):
+            hour_angle = math.radians(proj.x_to_lon(x + 0.5) - sublon)
+            v = sin_lat * sin_dec + cos_lat * cos_dec * math.cos(hour_angle)
+            px[x, y] = sum(1 for t in thresholds if v < t)
+    return out
 
 
-# Dates chosen by subsolar latitude, which is what the band geometry turns on. Between
-# the equinoxes the sun's declination passes through the twilight elevations themselves
-# (0 down to -18); there the iso-lines cross rather than nest, and a version that assumes
-# nesting paints deep-night tint over ground no band reaches. Solstices alone miss it —
-# they are the two regimes where nesting happens to hold.
+# Dates chosen by subsolar latitude, which is what the band geometry turns on. The
+# solstices alone are not enough: with the sun south of the equator the dark region
+# reaches the opposite pole, and within 18 degrees of it the deep bands reach neither,
+# so a model built on a single boundary curve closed against one edge of the canvas
+# gets those wrong while looking right in June.
 @pytest.mark.parametrize(
     "month, day",
     [
-        (6, 21),   # sublat +23.4, night south
-        (12, 21),  # sublat -23.4, night north
-        (2, 20),   # sublat ~-11, inside the twilight band: iso-lines cross
+        (6, 21),   # sublat +23.4
+        (12, 21),  # sublat -23.4
+        (2, 20),   # sublat ~-11
         (3, 21),   # sublat ~0, the degenerate equinox
-        (10, 15),  # sublat ~-8, crossing again on the way south
+        (9, 23),   # sublat ~0 going the other way
+        (10, 15),  # sublat ~-8
     ],
 )
-@pytest.mark.parametrize("darkness", ["subtle", "dramatic"])
-def test_collapsed_twilight_wash_matches_the_stacked_one(month, day, darkness):
-    from PIL import Image, ImageChops
+@pytest.mark.parametrize("style", ["vector", "raster"])
+def test_band_depth_matches_the_solar_elevation_equation(month, day, style):
+    from PIL import ImageChops
 
-    from worldtime import themes
-
+    w, h = 200, 125
+    proj = (render._vector_projection(w, h) if style == "vector"
+            else render._raster_projection(w, h, (0.5, 1.0))[0])
     dt = datetime(2026, month, day, 9, tzinfo=timezone.utc)
-    th = themes.load_theme("modus")
-    alpha = render.DARKNESS_ALPHA[darkness]
-    w, h = 400, 250
-    proj = render._vector_projection(w, h)
-    # A gradient base, so an error anywhere in the tone range shows up.
-    src = Image.linear_gradient("L").resize((w, h)).convert("RGBA")
+    sublat, sublon = render.sun.subsolar_point(dt)
 
-    got = render._overlay_night(src.copy(), dt, th, True, alpha, proj)
-    want = _overlay_night_stacked(src.copy(), dt, th, True, alpha, proj)
+    got = render._band_depth(w, h, proj, sublat, sublon, render.TWILIGHT_ELEVATIONS)
+    want = _true_band_depth(w, h, proj, sublat, sublon, render.TWILIGHT_ELEVATIONS)
 
-    diff = ImageChops.difference(got.convert("RGB"), want.convert("RGB"))
-    worst = max(hi for _lo, hi in diff.getextrema())
-    # Pillow rounds every blend, so four stacked passes drift from the exact wash more
-    # than one pass does; the single pass is the closer of the two. Anything past a few
-    # levels means the bands are counted wrongly, not rounded away.
-    assert worst <= 3, f"single-pass wash differs from the stacked one by {worst}/255"
+    diff = ImageChops.difference(got, want)
+    worst = max(diff.get_flattened_data())
+    wrong = sum(1 for p in diff.get_flattened_data() if p)
+    # Filling whole pixels can only place a boundary to within one of them, so a band
+    # edge lands one step out either way. A deeper error means the geometry is wrong.
+    assert worst <= 1, f"depth off by {worst} bands"
+    assert wrong < 0.05 * w * h, f"{wrong} of {w * h} pixels differ — more than edges"
+
+
+@pytest.mark.parametrize(
+    "elevation, along, across, expected",
+    [
+        (0.0, 0.0, 1.0, 90.0),    # equator at equinox: half the row is dark
+        (0.0, 0.9, 0.1, 0.0),     # midnight sun: the shadow never reaches this row
+        (0.0, -0.9, 0.1, 180.0),  # polar night: the whole row is dark
+        (0.0, 0.5, 0.0, 0.0),     # a pole, lit
+        (0.0, -0.5, 0.0, 180.0),  # a pole, dark
+    ],
+)
+def test_arc_half_width_degenerate_rows(elevation, along, across, expected):
+    import math
+    got = render._arc_half_width(math.sin(math.radians(elevation)), along, across)
+    assert abs(got - expected) < 1e-9
 
 
 def test_unknown_theme_falls_back():

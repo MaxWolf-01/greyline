@@ -43,3 +43,11 @@ def x_to_lon(x: float) -> float:
 def lat_to_y(lat: float) -> float:
     """Map a latitude to its y pixel (lon term negligible; use frame centre lon)."""
     return BY * lat + CY
+
+
+def y_to_lat(y: float) -> float:
+    """Inverse of the y mapping (AY is negligible, so we ignore the lon term).
+
+    Used to sweep latitudes down pixel rows.
+    """
+    return (y - CY) / BY
