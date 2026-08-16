@@ -122,17 +122,41 @@ def _vector_projection(out_w, out_h):
     )
 
 
-def _terminator_polygon(elevation, sublat, sublon, proj, w, h, step=3, day_side=False):
-    """Polygon (output px) for the region darker than `elevation` (or the lit side)."""
+def _terminator_curve(elevation, sublat, sublon, proj, w, h, step=3):
+    """The `elevation` iso-line as output px, sampled left to right across the canvas.
+
+    Shared by the day and night polygons for that elevation — they differ only in which
+    edge closes them, so the trigonometry runs once per elevation instead of twice.
+    """
     pts = []
     x = 0
     while x <= w:
         lat = sun.boundary_lat(proj.x_to_lon(x), sublat, sublon, elevation)
         pts.append((x, max(0.0, min(float(h), proj.lat_to_y(lat)))))
         x += step
-    close_bottom = sun.night_is_south(sublat) != day_side
-    pts += [(w, h), (0, h)] if close_bottom else [(w, 0), (0, 0)]
     return pts
+
+
+def _close_curve(curve, sublat, w, h, day_side):
+    """Close an iso-line into the polygon for the dark side (or the lit side)."""
+    close_bottom = sun.night_is_south(sublat) != day_side
+    return curve + ([(w, h), (0, h)] if close_bottom else [(w, 0), (0, 0)])
+
+
+def _terminator_polygon(elevation, sublat, sublon, proj, w, h, step=3, day_side=False):
+    """Polygon (output px) for the region darker than `elevation` (or the lit side)."""
+    curve = _terminator_curve(elevation, sublat, sublon, proj, w, h, step)
+    return _close_curve(curve, sublat, w, h, day_side)
+
+
+def _multiply_pow(tint, k):
+    """The multiply tint equivalent to `k` stacked multiplies by `tint`."""
+    return tuple(round(255.0 * (c / 255.0) ** k) for c in tint)
+
+
+def _screen_pow(tint, k):
+    """The screen tint equivalent to `k` stacked screens by `tint`."""
+    return tuple(round(255.0 - 255.0 * (1.0 - c / 255.0) ** k) for c in tint)
 
 
 def _blend_region(base, layer_rgb, op):
@@ -156,27 +180,40 @@ def _overlay_night(base, dt, theme, bands, alpha, proj):
       - night-side DARK washes (MULTIPLY toward midnight) — deepen the dark hemisphere.
     The civil/nautical/astronomical elevations are stacked, so each twilight band is a
     distinct step.
+
+    The bands nest, so the stack collapses into a single blend per side. A pixel covered
+    by `k` of them is washed `k` times, and both multiply and screen compose to a closed
+    form (_multiply_pow / _screen_pow). Painting the nested polygons outermost-first into
+    ONE layer, each with its own cumulative tint, gives the same picture from one blend
+    instead of four — at 4K that is ~170 MB of intermediate images per render rather than
+    ~660 MB, and it rounds once instead of four times.
     """
     w, h = base.size
     sublat, sublon = sun.subsolar_point(dt)
     elevations = TWILIGHT_ELEVATIONS if bands else (0.0,)
+    curves = {e: _terminator_curve(e, sublat, sublon, proj, w, h) for e in elevations}
 
-    def stack(day_side, base_color, tint, op):
+    def stack(day_side, base_color, tint, op, cumulative):
         nonlocal base
-        for elev in elevations:
-            layer = Image.new("RGB", (w, h), base_color)
-            ImageDraw.Draw(layer).polygon(
-                _terminator_polygon(elev, sublat, sublon, proj, w, h, day_side=day_side),
-                fill=tint,
-            )
-            base = _blend_region(base, layer, op)
+        # Outermost band first. The lit side GROWS as the elevation drops (more of the
+        # map counts as "brighter than -18" than as "brighter than 0"); the dark side
+        # shrinks. Drawn in that order each polygon overpaints the previous, so the k-th
+        # one drawn covers exactly the region that k bands reach.
+        order = tuple(reversed(elevations)) if day_side else elevations
+        layer = Image.new("RGB", (w, h), base_color)
+        d = ImageDraw.Draw(layer)
+        for k, elev in enumerate(order, start=1):
+            d.polygon(_close_curve(curves[elev], sublat, w, h, day_side),
+                      fill=cumulative(tint, k))
+        base = _blend_region(base, layer, op)
 
     # Day side: SCREEN a light tint (the wash colour scaled by its alpha); black = no-op.
     dw = theme.get("day_wash")
     if dw:
         a = dw[3] if len(dw) > 3 else 255
         tint = tuple(round(c * a / 255) for c in dw[:3])
-        stack(day_side=True, base_color=(0, 0, 0), tint=tint, op=ImageChops.screen)
+        stack(day_side=True, base_color=(0, 0, 0), tint=tint, op=ImageChops.screen,
+              cumulative=_screen_pow)
 
     # Night side: MULTIPLY toward the night colour; white = no-op. The per-band multiplier
     # is the night colour pulled toward white by `alpha` (so a stack of bands darkens
@@ -185,7 +222,8 @@ def _overlay_night(base, dt, theme, bands, alpha, proj):
     if alpha > 0 and night:
         t = alpha / 255.0
         tint = tuple(round(255 - (255 - c) * t) for c in night)
-        stack(day_side=False, base_color=(255, 255, 255), tint=tint, op=ImageChops.multiply)
+        stack(day_side=False, base_color=(255, 255, 255), tint=tint,
+              op=ImageChops.multiply, cumulative=_multiply_pow)
     return base
 
 

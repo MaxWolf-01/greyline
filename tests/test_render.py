@@ -51,6 +51,95 @@ def test_home_column_uses_standard_offset(monkeypatch, tz, lon, month, expected)
     assert captured["home_offset"] == expected
 
 
+# --- twilight wash: one blend must equal the stack it replaces ---
+
+@pytest.mark.parametrize("tint", [210, 235, 250])
+@pytest.mark.parametrize("k", [1, 2, 3, 4])
+def test_multiply_pow_matches_stacked_multiplies(tint, k):
+    # _overlay_night paints k nested bands into one layer instead of blending k times.
+    # The cumulative tint must reproduce what k stacked ImageChops.multiply passes did,
+    # or twilight steps shift. Pillow rounds each pass, so allow that drift.
+    for base in range(0, 256, 7):
+        stacked = base
+        for _ in range(k):
+            stacked = round(stacked * tint / 255)
+        collapsed = round(base * render._multiply_pow((tint,), k)[0] / 255)
+        assert abs(collapsed - stacked) <= 3
+
+
+@pytest.mark.parametrize("tint", [8, 24, 60])
+@pytest.mark.parametrize("k", [1, 2, 3, 4])
+def test_screen_pow_matches_stacked_screens(tint, k):
+    for base in range(0, 256, 7):
+        stacked = base
+        for _ in range(k):
+            stacked = 255 - round((255 - stacked) * (255 - tint) / 255)
+        collapsed = 255 - round((255 - base) * (255 - render._screen_pow((tint,), k)[0]) / 255)
+        assert abs(collapsed - stacked) <= 3
+
+
+def _overlay_night_stacked(base, dt, theme, bands, alpha, proj):
+    """The pre-collapse overlay: one full-canvas layer and one blend per band.
+
+    Kept here as the reference the single-blend version must reproduce. Nesting order
+    is the easy thing to get wrong — the lit side nests the opposite way from the dark
+    side — and a picture that is merely plausible would hide it.
+    """
+    from PIL import Image, ImageChops, ImageDraw
+    from worldtime import sun
+
+    w, h = base.size
+    sublat, sublon = sun.subsolar_point(dt)
+    elevations = render.TWILIGHT_ELEVATIONS if bands else (0.0,)
+
+    def stack(day_side, base_color, tint, op):
+        nonlocal base
+        for elev in elevations:
+            layer = Image.new("RGB", (w, h), base_color)
+            ImageDraw.Draw(layer).polygon(
+                render._terminator_polygon(elev, sublat, sublon, proj, w, h,
+                                           day_side=day_side),
+                fill=tint,
+            )
+            base = render._blend_region(base, layer, op)
+
+    dw = theme.get("day_wash")
+    if dw:
+        a = dw[3] if len(dw) > 3 else 255
+        stack(True, (0, 0, 0), tuple(round(c * a / 255) for c in dw[:3]), ImageChops.screen)
+    night = theme.get("night")
+    if alpha > 0 and night:
+        t = alpha / 255.0
+        stack(False, (255, 255, 255),
+              tuple(round(255 - (255 - c) * t) for c in night), ImageChops.multiply)
+    return base
+
+
+@pytest.mark.parametrize("month", [6, 12])  # night south of the terminator, then north
+@pytest.mark.parametrize("darkness", ["subtle", "dramatic"])
+def test_collapsed_twilight_wash_matches_the_stacked_one(month, darkness):
+    from PIL import Image, ImageChops
+    from worldtime import themes
+
+    dt = datetime(2026, month, 21, 9, tzinfo=timezone.utc)
+    th = themes.load_theme("modus")
+    alpha = render.DARKNESS_ALPHA[darkness]
+    w, h = 400, 250
+    proj = render._vector_projection(w, h)
+    # A gradient base, so an error anywhere in the tone range shows up.
+    src = Image.linear_gradient("L").resize((w, h)).convert("RGBA")
+
+    got = render._overlay_night(src.copy(), dt, th, True, alpha, proj)
+    want = _overlay_night_stacked(src.copy(), dt, th, True, alpha, proj)
+
+    diff = ImageChops.difference(got.convert("RGB"), want.convert("RGB"))
+    worst = max(hi for _lo, hi in diff.getextrema())
+    # Pillow rounds every blend, so four stacked passes drift from the exact wash more
+    # than one pass does; the collapsed version is the closer of the two. Anything past
+    # a few levels means the bands are nested or counted wrongly, not rounded away.
+    assert worst <= 3, f"collapsed wash differs from the stacked one by {worst}/255"
+
+
 def test_unknown_theme_falls_back():
     img = render.render(CITIES, dt=DT, out_size=(320, 200), theme="does-not-exist")
     assert img.size == (320, 200)
