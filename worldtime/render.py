@@ -201,11 +201,10 @@ def _screen_pow(tint, k):
     return tuple(round(255.0 - 255.0 * (1.0 - c / 255.0) ** k) for c in tint)
 
 
-def _blend_region(base, layer_rgb, op):
-    """Apply a blend `op` (ImageChops.multiply / .screen) of `layer_rgb` onto `base`
-    (RGB). The layer is a no-op colour everywhere except the band polygon (white for
-    multiply, black for screen), so only that region changes."""
-    return op(base, layer_rgb)
+# Rows per strip when washing the canvas. Multiply and screen are pixel-wise, so
+# strips give the same bytes as one full-canvas blend while its temporaries (the
+# tint layer and the blend result) shrink from canvas-sized to strip-sized.
+WASH_STRIP_ROWS = 256
 
 
 def _overlay_night(base, dt, theme, bands, alpha, proj):
@@ -224,8 +223,9 @@ def _overlay_night(base, dt, theme, bands, alpha, proj):
     Multiply and screen each compose to a closed form (_multiply_pow / _screen_pow), so
     one blend per side suffices: take how many bands reach each pixel, turn that count
     into the tint it earns, blend once. Blending band by band instead would allocate a
-    full-canvas RGB image per band, and a canvas is the largest allocation in the
-    renderer; the depth map is one byte per pixel.
+    full-canvas RGB image per band; the depth map is one byte per pixel, and the blend
+    runs strip by strip into `base` in place, so the canvas itself stays the render's
+    only full-size RGB allocation.
     """
     w, h = base.size
     sublat, sublon = sun.subsolar_point(dt)
@@ -236,14 +236,16 @@ def _overlay_night(base, dt, theme, bands, alpha, proj):
     depth = _band_depth(w, h, proj, sublat, sublon, elevations)
 
     def wash(lit, tint, op, cumulative):
-        nonlocal base
         # cumulative(tint, 0) is the blend's no-op colour, so untouched pixels pass through.
         steps = [cumulative(tint, k) for k in range(deepest + 1)]
-        def channel(c):
-            return [steps[deepest - d if lit else d][c]
-                    for d in (min(v, deepest) for v in range(256))]
-        base = _blend_region(base, Image.merge("RGB", [depth.point(channel(c))
-                                                       for c in range(3)]), op)
+        luts = [[steps[deepest - d if lit else d][c]
+                 for d in (min(v, deepest) for v in range(256))]
+                for c in range(3)]
+        for y0 in range(0, h, WASH_STRIP_ROWS):
+            box = (0, y0, w, min(y0 + WASH_STRIP_ROWS, h))
+            strip = depth.crop(box)
+            layer = Image.merge("RGB", [strip.point(lut) for lut in luts])
+            base.paste(op(base.crop(box), layer), box)
 
     # Day side: SCREEN a light tint (the wash colour scaled by its alpha); black = no-op.
     dw = theme.get("day_wash")
