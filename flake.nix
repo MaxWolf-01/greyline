@@ -28,7 +28,12 @@
           # fc-match (font resolution) is always needed; the compositor IPC tools
           # (swaymsg/swww/hyprctl/feh) come from the session PATH or the HM module.
           nativeBuildInputs = [ pkgs.makeWrapper ];
-          makeWrapperArgs = [ "--prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.fontconfig ]}" ];
+          makeWrapperArgs = [
+            "--prefix"
+            "PATH"
+            ":"
+            (pkgs.lib.makeBinPath [ pkgs.fontconfig ])
+          ];
           nativeCheckInputs = [ pkgs.python3Packages.pytestCheckHook ];
           pythonImportsCheck = [ "worldtime" ];
           doCheck = true;
